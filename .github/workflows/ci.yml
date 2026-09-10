@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request: {}
+  # Manual runs re-check the live leg against the workspace without a code change.
+  workflow_dispatch: {}
 
 # No job here writes to the repository, publishes a package or mints a token; the default token is
 # narrowed to the checkout it needs.
