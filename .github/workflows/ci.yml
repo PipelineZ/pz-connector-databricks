@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request: {}
 
+# No job here writes to the repository, publishes a package or mints a token; the default token is
+# narrowed to the checkout it needs.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
