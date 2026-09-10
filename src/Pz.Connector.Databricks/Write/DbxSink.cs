@@ -49,7 +49,9 @@ internal sealed class DbxSink(
             }
         }
 
-        if (schema.GetFieldByName(DbxSchemaMap.SequenceColumn) is not null)
+        // Databricks folds identifiers, so a differently-cased spelling would collide with the
+        // sequence column just the same.
+        if (schema.FieldsList.Any(f => string.Equals(f.Name, DbxSchemaMap.SequenceColumn, StringComparison.OrdinalIgnoreCase)))
         {
             throw Refuse(DbxCodes.Write_MergeKeys, $"{context}: column '{DbxSchemaMap.SequenceColumn}' is reserved for merge-mode row ordering and cannot appear in the write schema");
         }

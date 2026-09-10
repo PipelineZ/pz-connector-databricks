@@ -54,8 +54,10 @@ public sealed class DbxConnectionConfigTests
 
     [Theory]
     [InlineData("http://x.cloud.databricks.com", "must be an https URL")]
-    [InlineData("https://x.cloud.databricks.com/api", "no path")]
-    [InlineData("https://x.cloud.databricks.com/?a=1", "no path")]
+    [InlineData("https://x.cloud.databricks.com/api", "no user info, path")]
+    [InlineData("https://x.cloud.databricks.com/?a=1", "no user info, path")]
+    [InlineData("https://x.cloud.databricks.com/#f", "no user info, path")]
+    [InlineData("https://user:pass@x.cloud.databricks.com", "no user info, path")]
     [InlineData("not a url", "must be an https URL")]
     public void Host_must_be_a_bare_https_origin(string host, string fragment)
     {
@@ -63,7 +65,15 @@ public sealed class DbxConnectionConfigTests
         var cfg = DbxConnectionConfig.Parse(Valid(("host", host)), errors);
 
         Assert.Null(cfg);
-        Assert.Contains(errors, e => e.Contains("'host'") && e.Contains(fragment));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0101: ", StringComparison.Ordinal) && e.Contains("'host'") && e.Contains(fragment));
+    }
+
+    [Fact]
+    public void A_host_with_user_info_never_echoes_the_credential()
+    {
+        var errors = new List<string>();
+        Assert.Null(DbxConnectionConfig.Parse(Valid(("host", "https://user:pass@x.cloud.databricks.com")), errors));
+        Assert.DoesNotContain(errors, e => e.Contains("pass", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -71,17 +81,19 @@ public sealed class DbxConnectionConfigTests
     {
         var errors = new List<string>();
         Assert.Null(DbxConnectionConfig.Parse(Config([("warehouse_id", "abc"), ("auth", "token"), ("token", "t")]), errors));
-        Assert.Contains(errors, e => e.StartsWith("'host' is required", StringComparison.Ordinal));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0101: 'host' is required", StringComparison.Ordinal));
     }
 
     [Theory]
     [InlineData("")]
     [InlineData("ABC-123")]
+    // The regex is anchored with \A/\z: a '$' anchor would accept a value with a trailing newline.
+    [InlineData("abc123\n")]
     public void Warehouse_id_must_be_lowercase_hex(string id)
     {
         var errors = new List<string>();
         Assert.Null(DbxConnectionConfig.Parse(Valid(("warehouse_id", id)), errors));
-        Assert.Contains(errors, e => e.Contains("'warehouse_id'"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0102: ", StringComparison.Ordinal) && e.Contains("'warehouse_id'"));
     }
 
     [Fact]
@@ -89,8 +101,8 @@ public sealed class DbxConnectionConfigTests
     {
         var errors = new List<string>();
         Assert.Null(DbxConnectionConfig.Parse(Config([("host", "https://h"), ("warehouse_id", "abc"), ("auth", "token"), ("client_id", "x")]), errors));
-        Assert.Contains(errors, e => e.Contains("'token' is required"));
-        Assert.Contains(errors, e => e.Contains("'client_id'") && e.Contains("not used"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0103: ", StringComparison.Ordinal) && e.Contains("'token' is required"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0103: ", StringComparison.Ordinal) && e.Contains("'client_id'") && e.Contains("not used"));
     }
 
     [Fact]
@@ -98,8 +110,8 @@ public sealed class DbxConnectionConfigTests
     {
         var errors = new List<string>();
         Assert.Null(DbxConnectionConfig.Parse(Config([("host", "https://h"), ("warehouse_id", "abc"), ("auth", "oauth"), ("client_id", "x"), ("token", "t")]), errors));
-        Assert.Contains(errors, e => e.Contains("'client_secret' is required"));
-        Assert.Contains(errors, e => e.Contains("'token'") && e.Contains("not used"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0103: ", StringComparison.Ordinal) && e.Contains("'client_secret' is required"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0103: ", StringComparison.Ordinal) && e.Contains("'token'") && e.Contains("not used"));
     }
 
     [Fact]
@@ -107,7 +119,7 @@ public sealed class DbxConnectionConfigTests
     {
         var errors = new List<string>();
         Assert.Null(DbxConnectionConfig.Parse(Valid(("auth", "pat")), errors));
-        Assert.Contains(errors, e => e.Contains("'auth' must be one of token, oauth"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0103: ", StringComparison.Ordinal) && e.Contains("'auth' must be one of token, oauth"));
     }
 
     [Fact]
@@ -115,7 +127,7 @@ public sealed class DbxConnectionConfigTests
     {
         var errors = new List<string>();
         DbxConnectionConfig.Parse(Valid(("warehouse", "x")), errors);
-        Assert.Contains(errors, e => e.Contains("unknown connection key 'warehouse'"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0107: ", StringComparison.Ordinal) && e.Contains("unknown connection key 'warehouse'"));
     }
 
     [Fact]
@@ -123,7 +135,26 @@ public sealed class DbxConnectionConfigTests
     {
         var errors = new List<string>();
         Assert.Null(DbxConnectionConfig.Parse(Valid(("staging_volume", "pz.staging")), errors));
-        Assert.Contains(errors, e => e.Contains("'staging_volume'") && e.Contains("catalog.schema.volume"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0106: ", StringComparison.Ordinal) && e.Contains("'staging_volume'") && e.Contains("catalog.schema.volume"));
+    }
+
+    [Fact]
+    public void An_empty_catalog_or_schema_is_PZDB0107()
+    {
+        var errors = new List<string>();
+        Assert.Null(DbxConnectionConfig.Parse(Valid(("catalog", ""), ("schema", "")), errors));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0107: ", StringComparison.Ordinal) && e.Contains("'catalog' must not be empty"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0107: ", StringComparison.Ordinal) && e.Contains("'schema' must not be empty"));
+    }
+
+    [Fact]
+    public void Every_error_carries_its_own_code()
+    {
+        var errors = new List<string>();
+        DbxConnectionConfig.Parse(Config([("warehouse", "x"), ("auth", "pat"), ("staging_volume", "a.b")]), errors);
+
+        Assert.NotEmpty(errors);
+        Assert.All(errors, e => Assert.StartsWith("databricks: PZDB01", e, StringComparison.Ordinal));
     }
 
     [Fact]

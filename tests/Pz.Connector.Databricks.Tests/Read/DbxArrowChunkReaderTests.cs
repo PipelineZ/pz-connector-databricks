@@ -88,6 +88,55 @@ public sealed class DbxArrowChunkReaderTests
     }
 
     [Fact]
+    public async Task A_link_5xx_is_transient_PZDB0402()
+    {
+        var (fake, rest) = Setup();
+        fake.Tables["main.sales.orders"].LinkStatus = 500;
+        var (id, _) = await SubmitAsync(rest);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () =>
+        {
+            await foreach (var b in DbxArrowChunkReader.ReadAsync(rest, id, 0, "reading orders", NullLogger.Instance, CancellationToken.None)) b.Dispose();
+        });
+
+        Assert.StartsWith("databricks: PZDB0402: reading orders: chunk 0", ex.Message);
+        Assert.True(ex.IsTransient);
+    }
+
+    [Fact]
+    public async Task A_link_refusal_carries_its_retry_after_hint()
+    {
+        var (fake, rest) = Setup();
+        fake.Tables["main.sales.orders"].LinkStatus = 503;
+        fake.Tables["main.sales.orders"].LinkRetryAfter = "7";
+        var (id, _) = await SubmitAsync(rest);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () =>
+        {
+            await foreach (var b in DbxArrowChunkReader.ReadAsync(rest, id, 0, "reading orders", NullLogger.Instance, CancellationToken.None)) b.Dispose();
+        });
+
+        Assert.True(ex.IsTransient);
+        Assert.Equal(TimeSpan.FromSeconds(7), ex.RetryAfter);
+    }
+
+    [Fact]
+    public async Task A_link_404_after_the_refresh_is_PZDB0204_and_not_transient()
+    {
+        var (fake, rest) = Setup();
+        fake.Tables["main.sales.orders"].LinkStatus = 404;
+        var (id, _) = await SubmitAsync(rest);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () =>
+        {
+            await foreach (var b in DbxArrowChunkReader.ReadAsync(rest, id, 0, "reading orders", NullLogger.Instance, CancellationToken.None)) b.Dispose();
+        });
+
+        Assert.StartsWith("databricks: PZDB0204: reading orders: chunk 0 download was refused with HTTP 404 after refreshing the link", ex.Message);
+        Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
     public async Task A_torn_download_is_PZDB0402_transient()
     {
         var (fake, rest) = Setup();

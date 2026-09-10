@@ -208,7 +208,13 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
 
         if (statement.Table?.LinkStatus is { } forced)
         {
-            return new HttpResponseMessage((HttpStatusCode)forced);
+            var refusal = new HttpResponseMessage((HttpStatusCode)forced);
+            if (statement.Table.LinkRetryAfter is { } retryAfter)
+            {
+                refusal.Headers.TryAddWithoutValidation("Retry-After", retryAfter);
+            }
+
+            return refusal;
         }
 
         if (ExpireFirstLinkFetch && statement.LinksServedOnce.Add(index))

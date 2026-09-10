@@ -30,8 +30,20 @@ internal sealed partial class DbxRedactor
             return;
         }
 
+        // Every request re-registers the same bearer token; an add of a secret already held must not
+        // rebuild and re-sort the array.
+        if (Array.IndexOf(_secrets, secret) >= 0)
+        {
+            return;
+        }
+
         lock (_gate)
         {
+            if (Array.IndexOf(_secrets, secret) >= 0)
+            {
+                return;
+            }
+
             _secrets = Sorted([secret], _secrets);
         }
     }

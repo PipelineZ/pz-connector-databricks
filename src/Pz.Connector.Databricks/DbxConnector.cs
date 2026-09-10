@@ -16,10 +16,7 @@ public sealed class DbxConnector : IConnector, ISourceConnector, ISinkConnector
     private readonly Func<HttpClient> _httpClientFactory;
 
     public DbxConnector(ILoggerFactory? loggerFactory = null)
-        : this(loggerFactory, TimeProvider.System, 128L * 1024 * 1024, static () => new HttpClient(new SocketsHttpHandler
-        {
-            AutomaticDecompression = System.Net.DecompressionMethods.All,
-        }))
+        : this(loggerFactory, TimeProvider.System, 128L * 1024 * 1024, CreateHttpClient)
     {
     }
 
@@ -32,6 +29,21 @@ public sealed class DbxConnector : IConnector, ISourceConnector, ISinkConnector
         _spoolRollBytes = spoolRollBytes;
         _httpClientFactory = httpClientFactory;
     }
+
+    /// <summary>The client every request of one opened source or sink goes through. It carries no
+    /// overall timeout: a spool upload or a chunk download is arbitrarily large and a fixed deadline
+    /// would cut a healthy transfer, so the engine's <see cref="CancellationToken"/> -- threaded
+    /// through every call on this connector -- is the only cutoff. A connect timeout stays, so a
+    /// black-holed host still fails instead of hanging before a single byte moves.</summary>
+    internal static HttpClient CreateHttpClient() =>
+        new(new SocketsHttpHandler
+        {
+            AutomaticDecompression = System.Net.DecompressionMethods.All,
+            ConnectTimeout = TimeSpan.FromSeconds(30),
+        })
+        {
+            Timeout = Timeout.InfiniteTimeSpan,
+        };
 
     public ConnectorInfo Info { get; } = new(
         "databricks",
@@ -138,13 +150,12 @@ public sealed class DbxConnector : IConnector, ISourceConnector, ISinkConnector
         return (tokens, rest);
     }
 
-    // Redaction-free: Parse never embeds a secret's own text in an error message (every error names a
-    // key or a rule), so no redactor built from a successful parse exists yet to route this through.
+    // Parse codes each error where it is raised, so joining them adds no second prefix -- the same
+    // shape a dataset's or an output's config errors reach the caller in.
     internal static DbxConnectionConfig ParseOrThrow(ConnectorConfig config)
     {
         var errors = new List<string>();
         return DbxConnectionConfig.Parse(config, errors)
-            ?? throw new PzConnectorException(
-                DbxCodes.Message(DbxCodes.Config_Invalid, DbxRedactor.None, string.Join("; ", errors)), isTransient: false);
+            ?? throw new PzConnectorException(string.Join("; ", errors), isTransient: false);
     }
 }

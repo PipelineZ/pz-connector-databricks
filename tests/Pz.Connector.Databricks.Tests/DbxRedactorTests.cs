@@ -28,6 +28,18 @@ public sealed class DbxRedactorTests
     }
 
     [Fact]
+    public void AddSecret_of_a_secret_already_held_changes_nothing()
+    {
+        var redactor = new DbxRedactor(["first-secret"]);
+        redactor.AddSecret("minted-token");
+        redactor.AddSecret("minted-token");
+        redactor.AddSecret("first-secret");
+
+        Assert.Equal("*** and ***", redactor.Redact("minted-token and first-secret"));
+        Assert.Equal("*** and ***", redactor.Redact("first-secret and minted-token"));
+    }
+
+    [Fact]
     public void AddSecret_on_None_is_a_no_op()
     {
         DbxRedactor.None.AddSecret("leaky");

@@ -20,9 +20,14 @@ internal sealed record DbxReadPlan(string Sql, DbxParameter[]? Parameters)
 
     public static string ProbeSql(DbxReadConfig config)
     {
-        var inner = config.Query ?? $"select * from {config.Table!.Value.Quoted}";
+        var inner = config.Query is { } query ? Inner(query) : $"select * from {config.Table!.Value.Quoted}";
         return $"select * from ({inner}) as pz_probe limit 0";
     }
+
+    /// <summary>A user's query as it can appear inside a derived table. A statement terminator is
+    /// legal where the query runs on its own but a parse error once the query is parenthesized, and
+    /// the error names the wrapper rather than anything the user wrote.</summary>
+    private static string Inner(string query) => query.Trim().TrimEnd(';').TrimEnd();
 
     public static DbxReadPlan Build(DbxReadConfig config, DatasetSpec spec, ReadHints hints, DbxReadSchema schema, DbxRedactor redactor)
     {
@@ -34,7 +39,7 @@ internal sealed record DbxReadPlan(string Sql, DbxParameter[]? Parameters)
             }
 
             var wrapped = string.Join(", ", schema.Columns.Select(c => DbxSql.Projection(c.Name, c.SerializeExpression)));
-            return new DbxReadPlan($"select {wrapped} from ({query}) as pz_query", null);
+            return new DbxReadPlan($"select {wrapped} from ({Inner(query)}) as pz_query", null);
         }
 
         var terms = new List<string>();

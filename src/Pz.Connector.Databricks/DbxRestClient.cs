@@ -177,7 +177,9 @@ internal sealed class DbxRestClient(HttpClient http, DbxConnectionConfig cfg, ID
         return (null, fallback);
     }
 
-    private static TimeSpan? RetryAfterOf(HttpResponseMessage response)
+    /// <summary>The server's own retry hint, in seconds or as an HTTP-date. Reading it needs the live
+    /// response, so any caller that disposes one must take this first.</summary>
+    internal static TimeSpan? RetryAfterOf(HttpResponseMessage response)
     {
         var retryAfter = response.Headers.RetryAfter;
         if (retryAfter?.Delta is { } delta)

@@ -25,6 +25,13 @@ internal static class DbxErrors
         };
     }
 
+    /// <summary>A presigned-link failure. The link is served by cloud storage, not the workspace
+    /// control plane: there a 429 or any 5xx is a storage-side condition that clears on its own, so
+    /// every one of them is retryable -- unlike the control plane, where a 500 is the answer to the
+    /// request and re-sending it changes nothing.</summary>
+    public static PzConnectorException FromLink(int status, TimeSpan? retryAfter, DbxRedactor redactor, string context) =>
+        Transient(DbxCodes.Remote_Transient, redactor, $"{context}: {Describe(status, null, "presigned chunk download failed")}", retryAfter);
+
     public static PzConnectorException FromStatement(string? errorCode, string? message, DbxRedactor redactor, string context, string code)
     {
         var text = $"{context}: statement failed{(errorCode is null ? "" : $" ({errorCode})")}{(message is null ? "" : $": {message}")}";

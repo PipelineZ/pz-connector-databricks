@@ -30,12 +30,22 @@ public sealed class DbxConnectorTests
     }
 
     [Fact]
-    public void ParseOrThrow_wraps_config_errors_in_PZDB0107()
+    public void ParseOrThrow_joins_the_already_coded_errors()
     {
         var ex = Assert.Throws<PzConnectorException>(() => DbxConnector.ParseOrThrow(new ConnectorConfig(new Dictionary<string, object?>())));
 
-        Assert.StartsWith("databricks: PZDB0107: ", ex.Message);
+        Assert.StartsWith("databricks: PZDB0101: 'host' is required", ex.Message);
+        Assert.Contains("; databricks: PZDB0102: 'warehouse_id' is required", ex.Message);
+        Assert.Contains("; databricks: PZDB0103: 'auth' is required", ex.Message);
         Assert.False(ex.IsTransient);
+    }
+
+    [Fact]
+    public void The_connector_built_client_has_no_overall_timeout()
+    {
+        using var client = DbxConnector.CreateHttpClient();
+
+        Assert.Equal(Timeout.InfiniteTimeSpan, client.Timeout);
     }
 
     [Fact]

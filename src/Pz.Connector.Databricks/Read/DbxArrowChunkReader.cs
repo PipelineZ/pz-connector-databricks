@@ -8,8 +8,9 @@ namespace Pz.Connector.Databricks;
 
 /// <summary>Streams one result chunk: a fresh presigned link from the chunk endpoint, then a plain
 /// GET on it decoded through <see cref="ArrowStreamReader"/>. A link the storage service refuses as
-/// expired (403, or 400 from a signature check) is fetched again exactly once; anything else on the
-/// link is classified by status like any other HTTP failure. Batches are yielded as the reader
+/// expired (403, or 400 from a signature check) is fetched again exactly once; a 429 or any 5xx from
+/// the storage service is transient and carries its <c>Retry-After</c> hint; every other status is a
+/// refusal that re-reading would only repeat. Batches are yielded as the reader
 /// produces them; the engine owns and disposes each one.
 ///
 /// <para>A failure part-way through the body is classified by what it says about the result: a torn or
@@ -75,6 +76,8 @@ internal static class DbxArrowChunkReader
             }
 
             var status = (int)response.StatusCode;
+            // The retry hint lives on the response, which is disposed before any of the branches below run.
+            var retryAfter = DbxRestClient.RetryAfterOf(response);
             response.Dispose();
 
             if (status is 403 or 400 && attempt == 0)
@@ -85,7 +88,7 @@ internal static class DbxArrowChunkReader
 
             if (status is 429 or >= 500)
             {
-                throw DbxErrors.FromHttp(status, null, "presigned chunk download failed", null, rest.Redactor, $"{context}: chunk {chunkIndex}");
+                throw DbxErrors.FromLink(status, retryAfter, rest.Redactor, $"{context}: chunk {chunkIndex}");
             }
 
             throw new PzConnectorException(

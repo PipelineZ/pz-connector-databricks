@@ -108,6 +108,24 @@ public sealed class DbxReadPlanTests
         Assert.Equal("select * from (select 1 as x) as pz_probe limit 0", DbxReadPlan.ProbeSql(new DbxReadConfig(null, "select 1 as x")));
     }
 
+    [Theory]
+    [InlineData("select 1;")]
+    [InlineData("  select 1 ;  ")]
+    [InlineData("select 1;\n")]
+    public void ProbeSql_trims_whitespace_and_a_trailing_terminator(string query)
+    {
+        Assert.Equal("select * from (select 1) as pz_probe limit 0", DbxReadPlan.ProbeSql(new DbxReadConfig(null, query)));
+    }
+
+    [Fact]
+    public void A_wrapped_query_is_trimmed_of_its_terminator_too()
+    {
+        var plan = DbxReadPlan.Build(new DbxReadConfig(null, "select id, tags, span from t;\n"), Spec(), ReadHints.None, ComplexSchema, DbxRedactor.None);
+        Assert.Equal(
+            "select `id`, to_json(`tags`) as `tags`, cast(`span` as string) as `span` from (select id, tags, span from t) as pz_query",
+            plan.Sql);
+    }
+
     [Fact]
     public void Table_mode_with_a_serialized_column_and_no_hints_projects_every_column_explicitly()
     {

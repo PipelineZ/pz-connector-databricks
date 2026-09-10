@@ -17,6 +17,10 @@ internal sealed class FakeTable(params (string Name, IArrowType Type)[] columns)
     /// <summary>When set, every presigned-link GET for a chunk of this table answers with this status.</summary>
     public int? LinkStatus { get; set; }
 
+    /// <summary>When set alongside <see cref="LinkStatus"/>, the refusal carries this <c>Retry-After</c>
+    /// header value.</summary>
+    public string? LinkRetryAfter { get; set; }
+
     /// <summary>Overrides the fake workspace's default chunk size for reads of this table, so one
     /// suite can hold a small table to one chunk and still split a large one many ways.</summary>
     public int? RowsPerChunk { get; set; }

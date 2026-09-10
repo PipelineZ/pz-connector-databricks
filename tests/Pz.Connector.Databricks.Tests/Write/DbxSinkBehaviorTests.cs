@@ -44,6 +44,11 @@ public sealed class DbxSinkBehaviorTests
         var seq = await Assert.ThrowsAsync<PzConnectorException>(() => sink.BeginWriteAsync(Spec("append"), reserved, CancellationToken.None).AsTask());
         Assert.Contains("PZDB0302", seq.Message);
         Assert.Contains("_pz_seq", seq.Message);
+
+        // Databricks folds identifiers, so the guard has to as well.
+        var shouted = new Schema([new Field("_PZ_SEQ", Int64Type.Default, true)], null);
+        var upper = await Assert.ThrowsAsync<PzConnectorException>(() => sink.BeginWriteAsync(Spec("append"), shouted, CancellationToken.None).AsTask());
+        Assert.Contains("PZDB0302", upper.Message);
     }
 
     [Fact]
