@@ -276,7 +276,7 @@ Every failure is `databricks: PZDB####: <redacted text>`.
 | `PZDB0306` | the target statement (insert/replace/merge) failed |
 | `PZDB0307` | a write output option is unknown, or `schema_policy: evolve` was requested |
 | `PZDB0401` | `401`/`403` -- check the token or the service principal's permissions on the warehouse and catalog |
-| `PZDB0402` | `429`/`502`/`503`/`504`, a warehouse-side transient statement error, or a network failure before any response -- transient |
+| `PZDB0402` | an HTTP failure from the workspace: `429`/`502`/`503`/`504` or a network failure before any response are transient; any other status (`400`, `404`, `409`, `500`, ...) carries the same code and is not retried |
 | `PZDB0403` | the OAuth token endpoint refused the client credentials |
 | `PZDB0404` | the warehouse is unavailable while `select 1` is checked, or a statement-side transient condition (starting warehouse, busy cluster) -- transient |
 
