@@ -46,6 +46,13 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
     public (string Code, string Message)? FailNextStatement { get; set; }
     public int RateLimitNextRequests { get; set; }
     public bool ExpireFirstLinkFetch { get; set; }
+
+    /// <summary>When set, a presigned-link GET answers 200 and its body hands over the chunk's first
+    /// bytes and then throws, standing in for a download that stops part-way through.</summary>
+    public Func<Exception>? LinkBodyFault { get; set; }
+
+    /// <summary>When set, a presigned-link GET answers 200 with bytes that are not an Arrow stream.</summary>
+    public bool CorruptLinkBody { get; set; }
     public bool RejectToken { get; set; }
     public string WarehouseState { get; set; } = "RUNNING";
     public HashSet<string> AcceptedTokens { get; } = new(["fake-token", "fake-oauth-token"], StringComparer.Ordinal);
@@ -206,10 +213,71 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
             return new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("<Error><Code>ExpiredToken</Code></Error>") };
         }
 
+        if (CorruptLinkBody)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(Encoding.UTF8.GetBytes("this is not an arrow ipc stream, not even close"))
+                {
+                    Headers = { ContentType = new("application/octet-stream") },
+                },
+            };
+        }
+
+        if (LinkBodyFault is { } fault)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new FaultingStream(statement.Chunks[(int)index], fault)) };
+        }
+
         return new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new ByteArrayContent(statement.Chunks[(int)index]) { Headers = { ContentType = new("application/octet-stream") } },
         };
+    }
+
+    /// <summary>A body that hands over a prefix of the real bytes and then fails, so a decoder sees a
+    /// download that stopped rather than a clean end of stream.</summary>
+    private sealed class FaultingStream(byte[] body, Func<Exception> fault) : Stream
+    {
+        private const int Prefix = 8;
+
+        private int _position;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsMemory(offset, count).Span);
+
+        public override int Read(Span<byte> buffer)
+        {
+            var available = Math.Min(Prefix, body.Length) - _position;
+            if (available <= 0)
+            {
+                throw fault();
+            }
+
+            var n = Math.Min(buffer.Length, available);
+            body.AsSpan(_position, n).CopyTo(buffer);
+            _position += n;
+            return n;
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) =>
+            ValueTask.FromResult(Read(buffer.Span));
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) =>
+            Task.FromResult(Read(buffer.AsSpan(offset, count)));
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private HttpResponseMessage Submit(string body)

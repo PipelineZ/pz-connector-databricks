@@ -7,8 +7,13 @@ namespace Pz.Connector.Databricks;
 
 /// <summary>A Databricks table, view or query read through the SQL Statement Execution API. The
 /// schema comes from a <c>limit 0</c> probe and is cached per dataset; a plan runs the real
-/// statement to completion and exposes one partition per result chunk.</summary>
-internal sealed class DbxSource(DbxConnectionConfig cfg, DbxRestClient rest, TimeProvider time, ILogger logger) : ISource
+/// statement to completion and exposes one partition per result chunk.
+///
+/// <para><paramref name="owned"/> is whatever the caller handed over with the source -- the
+/// <see cref="HttpClient"/> the connector opened for it -- and is disposed exactly once with the
+/// source. The engine disposes a source it opened, so nothing else may hold that client.</para></summary>
+internal sealed class DbxSource(
+    DbxConnectionConfig cfg, DbxRestClient rest, TimeProvider time, ILogger logger, IDisposable? owned = null) : ISource
 {
     private readonly ConcurrentDictionary<string, DatasetSchema> _schemaCache = new(StringComparer.Ordinal);
 
@@ -45,7 +50,11 @@ internal sealed class DbxSource(DbxConnectionConfig cfg, DbxRestClient rest, Tim
         return false;
     }
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public ValueTask DisposeAsync()
+    {
+        owned?.Dispose();
+        return ValueTask.CompletedTask;
+    }
 
     private async Task<DatasetSchema> ResolveSchemaAsync(DatasetSpec spec, DbxReadConfig config, CancellationToken ct)
     {

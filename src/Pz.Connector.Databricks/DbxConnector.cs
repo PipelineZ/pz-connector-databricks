@@ -74,8 +74,13 @@ public sealed class DbxConnector : IConnector, ISourceConnector
     ValueTask<ISource> ISourceConnector.OpenAsync(ConnectorConfig config, CancellationToken ct)
     {
         var connection = ParseOrThrow(config);
-        var (_, rest) = OpenRest(connection, _httpClientFactory());
-        return ValueTask.FromResult<ISource>(new DbxSource(connection, rest, _time, _loggerFactory.CreateLogger<DbxSource>()));
+        var httpClient = _httpClientFactory();
+        var (_, rest) = OpenRest(connection, httpClient);
+
+        // The client (and with it the connection pool behind its handler) belongs to the source from
+        // here on: the engine disposes the source exactly once, and that is what closes it.
+        return ValueTask.FromResult<ISource>(
+            new DbxSource(connection, rest, _time, _loggerFactory.CreateLogger<DbxSource>(), httpClient));
     }
 
     /// <summary>Proves the credential and the warehouse: the warehouse lookup needs a valid token,

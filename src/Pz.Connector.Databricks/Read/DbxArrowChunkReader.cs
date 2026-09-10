@@ -10,7 +10,11 @@ namespace Pz.Connector.Databricks;
 /// GET on it decoded through <see cref="ArrowStreamReader"/>. A link the storage service refuses as
 /// expired (403, or 400 from a signature check) is fetched again exactly once; anything else on the
 /// link is classified by status like any other HTTP failure. Batches are yielded as the reader
-/// produces them; the engine owns and disposes each one.</summary>
+/// produces them; the engine owns and disposes each one.
+///
+/// <para>A failure part-way through the body is classified by what it says about the result: a torn or
+/// dropped download is a transport failure like any other and is retryable, while a stream that
+/// arrives whole but does not decode is a bad result and re-reading it would only fail again.</para></summary>
 internal static class DbxArrowChunkReader
 {
     public static async IAsyncEnumerable<RecordBatch> ReadAsync(
@@ -32,11 +36,15 @@ internal static class DbxArrowChunkReader
             {
                 throw;
             }
-            catch (Exception ex) when (ex is IOException or HttpRequestException or InvalidDataException or InvalidOperationException)
+            catch (Exception ex) when (ex is IOException or HttpRequestException)
+            {
+                throw DbxErrors.Wrap(ex, rest.Redactor, $"{context}: chunk {chunkIndex}");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
             {
                 throw new PzConnectorException(
                     DbxCodes.Message(DbxCodes.Read_ChunkDownloadFailed, rest.Redactor, $"{context}: chunk {chunkIndex} could not be decoded: {ex.Message}"),
-                    isTransient: true, innerException: ex);
+                    isTransient: false, innerException: ex);
             }
 
             if (batch is null)

@@ -177,6 +177,21 @@ public sealed class DbxSourceBehaviorTests
     }
 
     [Fact]
+    public async Task Disposing_a_source_disposes_the_http_client_it_was_opened_with()
+    {
+        var fake = NewFake();
+        var tracker = new TrackingHandler(fake);
+        var connector = new DbxConnector(null, TimeProvider.System, 128L * 1024 * 1024, () => new HttpClient(tracker));
+        var source = await ((ISourceConnector)connector).OpenAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
+        await source.GetSchemaAsync(Spec("orders"), CancellationToken.None);
+        Assert.False(tracker.Disposed);
+
+        await source.DisposeAsync();
+
+        Assert.True(tracker.Disposed);
+    }
+
+    [Fact]
     public async Task CheckConnection_reports_config_and_auth_failures_without_throwing()
     {
         var fake = NewFake();
@@ -188,5 +203,22 @@ public sealed class DbxSourceBehaviorTests
         var unauthorized = await Connector(fake).CheckConnectionAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
         Assert.False(unauthorized.Ok);
         Assert.Contains("PZDB0401", unauthorized.Message);
+    }
+
+    /// <summary>Records that the <see cref="HttpClient"/> wrapping it was disposed -- the only way to
+    /// observe from outside that the source closed the client it was handed.</summary>
+    private sealed class TrackingHandler(HttpMessageHandler inner) : DelegatingHandler(inner)
+    {
+        public bool Disposed { get; private set; }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Disposed = true;
+            }
+
+            base.Dispose(disposing);
+        }
     }
 }

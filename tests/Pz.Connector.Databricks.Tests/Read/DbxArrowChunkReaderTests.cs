@@ -86,4 +86,36 @@ public sealed class DbxArrowChunkReaderTests
         });
         Assert.True(ex.IsTransient);
     }
+
+    [Fact]
+    public async Task A_torn_download_is_PZDB0402_transient()
+    {
+        var (fake, rest) = Setup();
+        fake.LinkBodyFault = () => new IOException("the connection was reset");
+        var (id, _) = await SubmitAsync(rest);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () =>
+        {
+            await foreach (var b in DbxArrowChunkReader.ReadAsync(rest, id, 0, "reading orders", NullLogger.Instance, CancellationToken.None)) b.Dispose();
+        });
+
+        Assert.StartsWith("databricks: PZDB0402: reading orders: chunk 0: the connection was reset", ex.Message);
+        Assert.True(ex.IsTransient);
+    }
+
+    [Fact]
+    public async Task A_body_that_is_not_an_arrow_stream_is_PZDB0204_and_not_transient()
+    {
+        var (fake, rest) = Setup();
+        fake.CorruptLinkBody = true;
+        var (id, _) = await SubmitAsync(rest);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(async () =>
+        {
+            await foreach (var b in DbxArrowChunkReader.ReadAsync(rest, id, 0, "reading orders", NullLogger.Instance, CancellationToken.None)) b.Dispose();
+        });
+
+        Assert.StartsWith("databricks: PZDB0204: reading orders: chunk 0 could not be decoded: ", ex.Message);
+        Assert.False(ex.IsTransient);
+    }
 }
