@@ -4,6 +4,7 @@ using Apache.Arrow.Arrays;
 using Apache.Arrow.Types;
 using Parquet;
 using Parquet.Schema;
+using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.Databricks;
 
@@ -155,7 +156,14 @@ internal static class DbxColumnCopy
             group.WriteAsync<DateTime>(field, Map(a.Length, i => a.IsNull(i) ? (DateTime?)null : a.GetTimestamp(i)!.Value.UtcDateTime), null, cancellationToken: ct),
         TimestampArray a =>
             group.WriteAsync<DateTime>(field, Map(a.Length, i => a.IsNull(i) ? (DateTime?)null : DateTime.SpecifyKind(a.GetTimestamp(i)!.Value.DateTime, DateTimeKind.Unspecified)), null, cancellationToken: ct),
-        _ => throw new NotSupportedException($"column '{plan.Name}': Arrow array type '{array.GetType().Name}' has no spool encoding"),
+        // Reachable only if DbxSchemaMap.Plan's accepted types and this switch's handled types ever
+        // drift apart -- Plan already rejected everything else before a batch could get here. The
+        // output name isn't available at this call site, so unlike Plan's own PZDB0303 the message
+        // names only the column and the Arrow array type.
+        _ => throw new PzConnectorException(
+            DbxCodes.Message(DbxCodes.Write_UnsupportedArrowType, DbxRedactor.None,
+                $"column '{plan.Name}' has unsupported Arrow type '{array.GetType().Name}'"),
+            isTransient: false),
     };
 
     private static T?[] Map<T>(int n, Func<int, T?> get) where T : struct

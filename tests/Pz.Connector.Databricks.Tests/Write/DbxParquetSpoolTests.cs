@@ -61,6 +61,21 @@ public sealed class DbxParquetSpoolTests
         await group.ReadAsync(reader.Schema.DataFields[1], amount, null);
         Assert.All(amount, s => Assert.Equal("12345678901234567890.123456789", s));
 
+        // Proves DateTimeFormat.DateAndTimeMicros was the right fix: DateAndTime (Parquet's legacy
+        // millisecond format) would have truncated these sub-millisecond deltas to zero.
+        var ts = new DateTime?[rows];
+        await group.ReadAsync<DateTime>(reader.Schema.DataFields[3], ts, null);
+        var baseTs = new DateTime(2026, 9, 10, 0, 0, 0, DateTimeKind.Utc);
+        for (var r = 0; r < rows; r++)
+        {
+            Assert.Equal(baseTs.AddMicroseconds(10 + r), ts[r]!.Value);
+        }
+
+        for (var r = 1; r < rows; r++)
+        {
+            Assert.Equal(10, (ts[r]!.Value - ts[r - 1]!.Value).Ticks); // one microsecond == 10 ticks
+        }
+
         spool.Delete();
         Assert.False(Directory.Exists(spool.Dir));
     }
@@ -124,6 +139,62 @@ public sealed class DbxParquetSpoolTests
         await group.ReadAsync(reader.Schema.DataFields[0], values, null);
         Assert.Equal("2026-09-10T13:45:30.123456", values[0]);
         Assert.Null(values[1]);
+
+        spool.Delete();
+    }
+
+    // Decimal128Array.GetSqlDecimal and UInt64Array's digit-string rendering both need proof beyond
+    // the fixed positive value the other tests use: a negative decimal with scale digits, a null
+    // decimal, a uint64 above long.MaxValue (Decimal128's own range, so it cannot round-trip through
+    // System.Decimal or long), and a null uint64. A Date32 column rides along since it is otherwise
+    // untested by any spool test.
+    [Fact]
+    public async Task Negative_decimals_nulls_and_large_uint64_round_trip()
+    {
+        var schema = new Schema([
+            new Field("amt", new Decimal128Type(20, 4), true),
+            new Field("big", UInt64Type.Default, true),
+            new Field("d", Date32Type.Default, true),
+        ], null);
+
+        var amounts = new Decimal128Array.Builder(new Decimal128Type(20, 4));
+        amounts.Append("-12345.6789");
+        amounts.AppendNull();
+
+        var bigs = new UInt64Array.Builder();
+        bigs.Append(ulong.MaxValue); // 18446744073709551615, well above long.MaxValue
+        bigs.AppendNull();
+
+        var dates = new Date32Array.Builder();
+        dates.Append(new DateTime(2026, 9, 10));
+        dates.AppendNull();
+
+        var columns = DbxSchemaMap.Plan(schema, "out");
+        var spool = new DbxParquetSpool(TempDir(), columns, withSequence: false, rollBytes: long.MaxValue);
+        using (var batch = new RecordBatch(schema, [amounts.Build(), bigs.Build(), dates.Build()], 2))
+        {
+            await spool.WriteBatchAsync(batch, 0, CancellationToken.None);
+        }
+
+        var files = await spool.CloseAsync();
+
+        await using var reader = await ParquetReader.CreateAsync(files[0]);
+        using var group = reader.OpenRowGroupReader(0);
+
+        var amt = new string[2];
+        await group.ReadAsync(reader.Schema.DataFields[0], amt, null);
+        Assert.Equal("-12345.6789", amt[0]);
+        Assert.Null(amt[1]);
+
+        var big = new string[2];
+        await group.ReadAsync(reader.Schema.DataFields[1], big, null);
+        Assert.Equal(ulong.MaxValue.ToString(), big[0]);
+        Assert.Null(big[1]);
+
+        var d = new DateTime?[2];
+        await group.ReadAsync<DateTime>(reader.Schema.DataFields[2], d, null);
+        Assert.Equal(new DateTime(2026, 9, 10), d[0]!.Value);
+        Assert.Null(d[1]);
 
         spool.Delete();
     }
