@@ -42,7 +42,7 @@ public sealed class DbxTypeMapTests
     {
         var ts = Assert.IsType<TimestampType>(DbxTypeMap.ToArrow("TIMESTAMP", "TIMESTAMP", "c"));
         Assert.Equal(TimeUnit.Microsecond, ts.Unit);
-        Assert.Equal("UTC", ts.Timezone);
+        Assert.Equal("Etc/UTC", ts.Timezone);
         var ntz = Assert.IsType<TimestampType>(DbxTypeMap.ToArrow("TIMESTAMP_NTZ", "TIMESTAMP", "c"));
         Assert.Equal(TimeUnit.Microsecond, ntz.Unit);
         Assert.True(string.IsNullOrEmpty(ntz.Timezone));
@@ -91,5 +91,58 @@ public sealed class DbxTypeMapTests
         Assert.Equal("DECIMAL(12,3)", DbxTypeMap.ParameterType(new Decimal128Type(12, 3)));
         Assert.Equal("TIMESTAMP", DbxTypeMap.ParameterType(new TimestampType(TimeUnit.Microsecond, "UTC")));
         Assert.Equal("TIMESTAMP_NTZ", DbxTypeMap.ParameterType(new TimestampType(TimeUnit.Microsecond, (string?)null)));
+    }
+
+    [Theory]
+    [InlineData("ARRAY<INT>", "ARRAY", "to_json(`c`)")]
+    [InlineData("ARRAY", "ARRAY", "to_json(`c`)")]
+    [InlineData("MAP<STRING, INT>", "MAP", "to_json(`c`)")]
+    [InlineData("MAP", "MAP", "to_json(`c`)")]
+    [InlineData("STRUCT<a: INT NOT NULL>", "STRUCT", "to_json(`c`)")]
+    [InlineData("STRUCT", "STRUCT", "to_json(`c`)")]
+    [InlineData("INTERVAL DAY", "INTERVAL", "cast(`c` as string)")]
+    [InlineData("INTERVAL", "INTERVAL", "cast(`c` as string)")]
+    [InlineData("INTERVAL YEAR TO MONTH", "INTERVAL", "cast(`c` as string)")]
+    [InlineData("STRING", "STRING", null)]
+    [InlineData("BIGINT", "LONG", null)]
+    [InlineData("DECIMAL(10,2)", "DECIMAL", null)]
+    [InlineData("VARIANT", "USER_DEFINED_TYPE", null)]
+    public void SerializeExpression_projects_complex_and_interval_types(string typeText, string typeName, string? expected)
+    {
+        Assert.Equal(expected, DbxTypeMap.SerializeExpression(typeText, typeName, "`c`"));
+    }
+
+    [Fact]
+    public void ToReadSchema_marks_serialized_columns_and_keeps_the_arrow_schema_utf8()
+    {
+        var readSchema = DbxTypeMap.ToReadSchema(new DbxResultSchema(3,
+        [
+            new DbxColumnInfo("id", "BIGINT", "LONG", 0),
+            new DbxColumnInfo("tags", "ARRAY<INT>", "ARRAY", 1),
+            new DbxColumnInfo("span", "INTERVAL DAY", "INTERVAL", 2),
+        ]));
+
+        Assert.Equal(["id", "tags", "span"], readSchema.Schema.FieldsList.Select(f => f.Name));
+        Assert.IsType<StringType>(readSchema.Schema.FieldsList[1].DataType);
+        Assert.IsType<StringType>(readSchema.Schema.FieldsList[2].DataType);
+        Assert.True(readSchema.HasSerializedColumns);
+
+        Assert.Equal(3, readSchema.Columns.Count);
+        Assert.Null(readSchema.Columns[0].SerializeExpression);
+        Assert.Equal("to_json(`tags`)", readSchema.Columns[1].SerializeExpression);
+        Assert.Equal("cast(`span` as string)", readSchema.Columns[2].SerializeExpression);
+    }
+
+    [Fact]
+    public void ToReadSchema_reports_no_serialized_columns_when_none_are_complex()
+    {
+        var readSchema = DbxTypeMap.ToReadSchema(new DbxResultSchema(2,
+        [
+            new DbxColumnInfo("id", "BIGINT", "LONG", 0),
+            new DbxColumnInfo("name", "STRING", "STRING", 1),
+        ]));
+
+        Assert.False(readSchema.HasSerializedColumns);
+        Assert.All(readSchema.Columns, c => Assert.Null(c.SerializeExpression));
     }
 }

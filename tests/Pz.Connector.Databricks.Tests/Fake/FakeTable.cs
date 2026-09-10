@@ -8,6 +8,8 @@ namespace Pz.Connector.Databricks.Tests;
 /// matching <see cref="Columns"/>; only the handful of Arrow types the suites use are encodable.</summary>
 internal sealed class FakeTable(params (string Name, IArrowType Type)[] columns)
 {
+    private readonly Dictionary<int, (string TypeText, string TypeName)> _databricksTypes = [];
+
     public (string Name, IArrowType Type)[] Columns { get; } = columns;
 
     public List<object?[]> Rows { get; } = [];
@@ -19,19 +21,35 @@ internal sealed class FakeTable(params (string Name, IArrowType Type)[] columns)
     /// suite can hold a small table to one chunk and still split a large one many ways.</summary>
     public int? RowsPerChunk { get; set; }
 
-    public string TypeText(int column) => Columns[column].Type switch
+    /// <summary>Declares <paramref name="column"/>'s manifest type as <paramref name="typeText"/>/
+    /// <paramref name="typeName"/> instead of the one inferred from its Arrow storage type -- a
+    /// complex/interval column is declared with its real Databricks type while its rows hold the
+    /// string the connector's own serializing projection would produce.</summary>
+    public FakeTable WithDatabricksType(string column, string typeText, string typeName)
+    {
+        var index = System.Array.FindIndex(Columns, c => c.Name == column);
+        if (index < 0)
+        {
+            throw new ArgumentException($"no such column '{column}'", nameof(column));
+        }
+
+        _databricksTypes[index] = (typeText, typeName);
+        return this;
+    }
+
+    public string TypeText(int column) => _databricksTypes.TryGetValue(column, out var t) ? t.TypeText : Columns[column].Type switch
     {
         Int64Type => "BIGINT",
         Int32Type => "INT",
         StringType => "STRING",
         DoubleType => "DOUBLE",
         BooleanType => "BOOLEAN",
-        TimestampType t => string.IsNullOrEmpty(t.Timezone) ? "TIMESTAMP_NTZ" : "TIMESTAMP",
+        TimestampType ts => string.IsNullOrEmpty(ts.Timezone) ? "TIMESTAMP_NTZ" : "TIMESTAMP",
         Date32Type => "DATE",
         _ => throw new NotSupportedException(Columns[column].Type.Name),
     };
 
-    public string TypeName(int column) => Columns[column].Type switch
+    public string TypeName(int column) => _databricksTypes.TryGetValue(column, out var t) ? t.TypeName : Columns[column].Type switch
     {
         Int64Type => "LONG",
         Int32Type => "INT",
@@ -43,19 +61,20 @@ internal sealed class FakeTable(params (string Name, IArrowType Type)[] columns)
         _ => throw new NotSupportedException(Columns[column].Type.Name),
     };
 
-    public Schema ArrowSchema => new(Columns.Select(c => new Field(c.Name, c.Type, true)).ToList(), null);
-
-    public byte[] ToArrowStream(IReadOnlyList<object?[]> rows)
+    /// <summary>Encodes only <paramref name="projection"/>'s columns, in that order, as an Arrow IPC
+    /// stream -- <see langword="null"/> serves every column in declared order (a <c>select *</c>).
+    /// A timestamp with a timezone always goes out as <c>Etc/UTC</c>, matching what the real service
+    /// puts on the wire regardless of the zone name a test constructed the column with.</summary>
+    public byte[] ToArrowStream(IReadOnlyList<object?[]> rows, IReadOnlyList<int>? projection = null)
     {
-        var arrays = new IArrowArray[Columns.Length];
-        for (var c = 0; c < Columns.Length; c++)
-        {
-            arrays[c] = BuildColumn(c, rows);
-        }
+        var cols = projection ?? Enumerable.Range(0, Columns.Length).ToList();
+        var fields = cols.Select(c => new Field(Columns[c].Name, WireType(Columns[c].Type), true)).ToList();
+        var schema = new Schema(fields, null);
+        var arrays = cols.Select(c => BuildColumn(c, rows)).ToArray();
 
-        using var batch = new RecordBatch(ArrowSchema, arrays, rows.Count);
+        using var batch = new RecordBatch(schema, arrays, rows.Count);
         using var ms = new MemoryStream();
-        using (var writer = new ArrowStreamWriter(ms, ArrowSchema, leaveOpen: true))
+        using (var writer = new ArrowStreamWriter(ms, schema, leaveOpen: true))
         {
             writer.WriteRecordBatch(batch);
             writer.WriteEnd();
@@ -63,6 +82,9 @@ internal sealed class FakeTable(params (string Name, IArrowType Type)[] columns)
 
         return ms.ToArray();
     }
+
+    private static IArrowType WireType(IArrowType type) =>
+        type is TimestampType t && !string.IsNullOrEmpty(t.Timezone) ? new TimestampType(t.Unit, "Etc/UTC") : type;
 
     private IArrowArray BuildColumn(int c, IReadOnlyList<object?[]> rows)
     {
@@ -100,7 +122,7 @@ internal sealed class FakeTable(params (string Name, IArrowType Type)[] columns)
             }
             case TimestampType t:
             {
-                var b = new TimestampArray.Builder(t);
+                var b = new TimestampArray.Builder((TimestampType)WireType(t));
                 foreach (var r in rows) { if (r[c] is null) b.AppendNull(); else b.Append((DateTimeOffset)r[c]!); }
                 return b.Build();
             }

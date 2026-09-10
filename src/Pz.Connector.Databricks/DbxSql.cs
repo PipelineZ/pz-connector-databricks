@@ -7,10 +7,17 @@ internal static partial class DbxSql
 {
     public static string Q(string identifier) => TableRef.QuoteIdentifier(identifier);
 
-    public static string Select(TableRef table, IReadOnlyList<string>? columns, IReadOnlyList<string> whereTerms)
+    /// <summary>A column's rendered projection entry: its serialize expression aliased back to its
+    /// own name, or a bare quoted reference when it needs no serialization.</summary>
+    public static string Projection(string column, string? serializeExpression) =>
+        serializeExpression is null ? Q(column) : $"{serializeExpression} as {Q(column)}";
+
+    /// <summary><paramref name="projection"/> entries are already-rendered column expressions (see
+    /// <see cref="Projection"/>); an empty list selects every column with <c>*</c>.</summary>
+    public static string Select(TableRef table, IReadOnlyList<string> projection, IReadOnlyList<string> whereTerms)
     {
-        var projection = columns is { Count: > 0 } ? string.Join(", ", columns.Select(Q)) : "*";
-        var sql = $"select {projection} from {table.Quoted}";
+        var cols = projection.Count > 0 ? string.Join(", ", projection) : "*";
+        var sql = $"select {cols} from {table.Quoted}";
         return whereTerms.Count == 0 ? sql : $"{sql} where {string.Join(" and ", whereTerms)}";
     }
 }

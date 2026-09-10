@@ -15,19 +15,20 @@ namespace Pz.Connector.Databricks;
 internal sealed class DbxSource(
     DbxConnectionConfig cfg, DbxRestClient rest, TimeProvider time, ILogger logger, IDisposable? owned = null) : ISource
 {
-    private readonly ConcurrentDictionary<string, DatasetSchema> _schemaCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DbxReadSchema> _schemaCache = new(StringComparer.Ordinal);
 
     public async ValueTask<DatasetSchema> GetSchemaAsync(DatasetSpec spec, CancellationToken ct)
     {
         var config = ParseConfig(spec);
-        return await ResolveSchemaAsync(spec, config, ct).ConfigureAwait(false);
+        var readSchema = await ResolveSchemaAsync(spec, config, ct).ConfigureAwait(false);
+        return new DatasetSchema(readSchema.Schema);
     }
 
     public async ValueTask<IReadOnlyList<IDatasetPartition>> PlanReadAsync(DatasetSpec spec, ReadHints hints, CancellationToken ct)
     {
         var config = ParseConfig(spec);
         var schema = await ResolveSchemaAsync(spec, config, ct).ConfigureAwait(false);
-        var plan = DbxReadPlan.Build(config, spec, hints, schema.Schema, cfg.Redactor);
+        var plan = DbxReadPlan.Build(config, spec, hints, schema, cfg.Redactor);
         var context = Context(spec, config);
 
         var start = time.GetTimestamp();
@@ -56,7 +57,7 @@ internal sealed class DbxSource(
         return ValueTask.CompletedTask;
     }
 
-    private async Task<DatasetSchema> ResolveSchemaAsync(DatasetSpec spec, DbxReadConfig config, CancellationToken ct)
+    private async Task<DbxReadSchema> ResolveSchemaAsync(DatasetSpec spec, DbxReadConfig config, CancellationToken ct)
     {
         var key = $"{spec.Dataset}|{config.Table?.FullName ?? config.Query}";
         if (_schemaCache.TryGetValue(key, out var cached))
@@ -71,7 +72,7 @@ internal sealed class DbxSource(
                 DbxCodes.Message(DbxCodes.Read_StatementFailed, cfg.Redactor, $"{Context(spec, config)}: the schema probe returned no manifest"),
                 isTransient: false);
 
-        var schema = new DatasetSchema(DbxTypeMap.ToArrowSchema(resultSchema));
+        var schema = DbxTypeMap.ToReadSchema(resultSchema);
         _schemaCache[key] = schema;
         return schema;
     }

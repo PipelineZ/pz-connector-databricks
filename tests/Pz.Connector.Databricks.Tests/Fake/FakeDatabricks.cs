@@ -353,12 +353,24 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
 
         FakeTable source;
         List<object?[]> rows;
-        if (Queries.TryGetValue(sql, out var aliased))
+        string cols;
+
+        var wrapped = QueryProjectionPattern().Match(sql);
+        if (wrapped.Success)
+        {
+            // The connector wraps a query: read as a derived table only when it needs to serialize a
+            // column; the inner text is still the user's query, resolved the same way as an unwrapped one.
+            source = ResolveSource(wrapped.Groups["inner"].Value, request);
+            rows = [.. source.Rows];
+            cols = wrapped.Groups["cols"].Value;
+        }
+        else if (Queries.TryGetValue(sql, out var aliased))
         {
             // A query: read runs verbatim; the fake serves the aliased table whole rather than
             // interpreting SQL it did not generate.
             source = Tables[aliased];
             rows = [.. source.Rows];
+            cols = "*";
         }
         else
         {
@@ -370,7 +382,10 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
 
             source = ResolveSource(sql, request);
             rows = FilterByWatermark(source, read.Groups["where"].Value, request.Parameters);
+            cols = read.Groups["cols"].Value;
         }
+
+        var projection = ResolveProjection(source, cols);
 
         statement.Table = source;
         statement.ResultRows = rows;
@@ -379,12 +394,82 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
         {
             for (var offset = 0; offset < rows.Count; offset += statement.ChunkRows)
             {
-                statement.Chunks.Add(source.ToArrowStream(rows.Skip(offset).Take(statement.ChunkRows).ToList()));
+                statement.Chunks.Add(source.ToArrowStream(rows.Skip(offset).Take(statement.ChunkRows).ToList(), projection));
             }
         }
         else
         {
-            statement.Inline = rows.Select(r => r.Select(v => v?.ToString()).ToArray()).ToArray();
+            statement.Inline = rows.Select(r => projection.Select(i => r[i]?.ToString()).ToArray()).ToArray();
+        }
+    }
+
+    /// <summary>Parses a rendered projection list into the source column indices it selects, in
+    /// order -- <c>*</c> selects every column. Each item must be a bare backtick-quoted column, a
+    /// <c>to_json(...)</c> or <c>cast(... as string)</c> serialization aliased back to itself, or the
+    /// statement is malformed. A bare reference (backtick or <c>*</c>) to a column declared
+    /// <c>ARRAY</c>/<c>MAP</c>/<c>STRUCT</c>/<c>INTERVAL</c> fails loudly: the real service would hand
+    /// back a native nested/interval type this fake's declared schema cannot describe, so an
+    /// unserialized complex column must never be silently served as a string.</summary>
+    private static List<int> ResolveProjection(FakeTable source, string colsText)
+    {
+        if (colsText == "*")
+        {
+            for (var i = 0; i < source.Columns.Length; i++)
+            {
+                GuardSerialized(source, i);
+            }
+
+            return [.. Enumerable.Range(0, source.Columns.Length)];
+        }
+
+        var indices = new List<int>();
+        foreach (var raw in colsText.Split(", "))
+        {
+            var item = raw.Trim();
+
+            var bare = BareColumnPattern().Match(item);
+            if (bare.Success)
+            {
+                var index = ColumnIndex(source, bare.Groups["c"].Value);
+                GuardSerialized(source, index);
+                indices.Add(index);
+                continue;
+            }
+
+            var json = ToJsonProjectionPattern().Match(item);
+            if (json.Success && json.Groups["c"].Value == json.Groups["alias"].Value)
+            {
+                indices.Add(ColumnIndex(source, json.Groups["c"].Value));
+                continue;
+            }
+
+            var cast = CastProjectionPattern().Match(item);
+            if (cast.Success && cast.Groups["c"].Value == cast.Groups["alias"].Value)
+            {
+                indices.Add(ColumnIndex(source, cast.Groups["c"].Value));
+                continue;
+            }
+
+            throw new FakeSqlException($"[PARSE_SYNTAX_ERROR] unrecognized projection item: {item}");
+        }
+
+        return indices;
+    }
+
+    private static int ColumnIndex(FakeTable source, string name)
+    {
+        var index = Array.FindIndex(source.Columns, c => c.Name == name);
+        return index >= 0 ? index : throw new FakeSqlException($"[UNRESOLVED_COLUMN_EXCEPTION] no such column '{name}'");
+    }
+
+    private static void GuardSerialized(FakeTable source, int index)
+    {
+        var typeText = source.TypeText(index);
+        var head = typeText.Trim().ToUpperInvariant().Split('(', '<', ' ')[0];
+        if (head is "ARRAY" or "MAP" or "STRUCT" or "INTERVAL")
+        {
+            throw new FakeSqlException(
+                $"[UNSERIALIZED_COMPLEX_COLUMN] column '{source.Columns[index].Name}' is declared '{typeText}'; select it through to_json/cast, not bare");
         }
     }
 
@@ -489,8 +574,20 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
     [GeneratedRegex(@"^select \* from \((?<inner>.+)\) as pz_probe limit 0$", RegexOptions.Singleline)]
     private static partial Regex ProbePattern();
 
+    [GeneratedRegex(@"^select (?<cols>.+?) from \((?<inner>.+)\) as pz_query$", RegexOptions.Singleline)]
+    private static partial Regex QueryProjectionPattern();
+
     [GeneratedRegex(@"^select (?<cols>.+?) from `[^`]+`\.`[^`]+`\.`[^`]+`(?: where (?<where>.+))?$", RegexOptions.Singleline)]
     private static partial Regex ReadPattern();
+
+    [GeneratedRegex(@"^`(?<c>[^`]+)`$")]
+    private static partial Regex BareColumnPattern();
+
+    [GeneratedRegex(@"^to_json\(`(?<c>[^`]+)`\) as `(?<alias>[^`]+)`$")]
+    private static partial Regex ToJsonProjectionPattern();
+
+    [GeneratedRegex(@"^cast\(`(?<c>[^`]+)` as string\) as `(?<alias>[^`]+)`$")]
+    private static partial Regex CastProjectionPattern();
 
     [GeneratedRegex(@"from `(?<c>[^`]+)`\.`(?<s>[^`]+)`\.`(?<t>[^`]+)`")]
     private static partial Regex TablePattern();

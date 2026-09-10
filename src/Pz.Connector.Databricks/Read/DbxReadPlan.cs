@@ -1,4 +1,3 @@
-using Apache.Arrow;
 using Pz.Connectors.Abstractions;
 
 namespace Pz.Connector.Databricks;
@@ -7,7 +6,13 @@ namespace Pz.Connector.Databricks;
 /// column list and predicate into the SELECT and turns the watermark bounds into named parameters
 /// typed from the cursor column; query mode runs the user's SQL verbatim with no pushdown of any
 /// kind. Every WHERE term is self-parenthesized so a disjunctive predicate cannot bind into the
-/// watermark's AND.</summary>
+/// watermark's AND.
+///
+/// <para>A dataset with no serialized column (see <see cref="DbxReadSchema.HasSerializedColumns"/>)
+/// renders exactly the SQL it always has -- <c>select *</c>, or the user's query verbatim. Only when
+/// the read schema has at least one <c>ARRAY</c>/<c>MAP</c>/<c>STRUCT</c>/<c>INTERVAL</c> column does
+/// the projection become explicit (table mode) or the query get wrapped as a derived table (query
+/// mode), because only then is there something to serialize.</para></summary>
 internal sealed record DbxReadPlan(string Sql, DbxParameter[]? Parameters)
 {
     public const string LowerParameter = "pz_lower";
@@ -19,11 +24,17 @@ internal sealed record DbxReadPlan(string Sql, DbxParameter[]? Parameters)
         return $"select * from ({inner}) as pz_probe limit 0";
     }
 
-    public static DbxReadPlan Build(DbxReadConfig config, DatasetSpec spec, ReadHints hints, Schema schema, DbxRedactor redactor)
+    public static DbxReadPlan Build(DbxReadConfig config, DatasetSpec spec, ReadHints hints, DbxReadSchema schema, DbxRedactor redactor)
     {
         if (config.Query is { } query)
         {
-            return new DbxReadPlan(query, null);
+            if (!schema.HasSerializedColumns)
+            {
+                return new DbxReadPlan(query, null);
+            }
+
+            var wrapped = string.Join(", ", schema.Columns.Select(c => DbxSql.Projection(c.Name, c.SerializeExpression)));
+            return new DbxReadPlan($"select {wrapped} from ({query}) as pz_query", null);
         }
 
         var terms = new List<string>();
@@ -39,8 +50,18 @@ internal sealed record DbxReadPlan(string Sql, DbxParameter[]? Parameters)
 
         if (spec.WatermarkCursor is { } cursor && (spec.WatermarkValue is not null || spec.WatermarkUpperBound is not null))
         {
-            var field = schema.GetFieldByName(cursor)
+            var field = schema.Schema.GetFieldByName(cursor)
                 ?? throw Unsupported(redactor, $"watermark cursor column '{cursor}' is not in the read schema");
+
+            // The declared Arrow type of a serialized column is utf8 like any ordinary string column,
+            // so ParameterType alone would accept it; its values are computed by the projection, not
+            // stored, and cannot be compared against as a statement parameter.
+            var column = schema.Columns.FirstOrDefault(c => c.Name == cursor);
+            if (column?.SerializeExpression is not null)
+            {
+                throw Unsupported(redactor, $"watermark cursor column '{cursor}' is serialized in the read statement and cannot be a statement parameter");
+            }
+
             var type = DbxTypeMap.ParameterType(field.DataType)
                 ?? throw Unsupported(redactor, $"watermark cursor column '{cursor}' has Arrow type '{field.DataType.Name}', which cannot be a statement parameter");
 
@@ -58,8 +79,26 @@ internal sealed record DbxReadPlan(string Sql, DbxParameter[]? Parameters)
             }
         }
 
-        var sql = DbxSql.Select(config.Table!.Value, hints.Columns, terms);
+        var projection = BuildProjection(hints, schema);
+        var sql = DbxSql.Select(config.Table!.Value, projection, terms);
         return new DbxReadPlan(sql, parameters.Count == 0 ? null : [.. parameters]);
+    }
+
+    /// <summary>The engine's pruned column list wins when it is non-empty; otherwise every schema
+    /// column is projected explicitly, but only when at least one needs serializing -- an empty list
+    /// here is what makes <see cref="DbxSql.Select"/> fall back to <c>*</c>, matching the SQL this
+    /// connector has always emitted for a dataset with nothing to serialize.</summary>
+    private static List<string> BuildProjection(ReadHints hints, DbxReadSchema schema)
+    {
+        if (hints.Columns is { Count: > 0 })
+        {
+            var byName = schema.Columns.ToDictionary(c => c.Name, c => c.SerializeExpression, StringComparer.Ordinal);
+            return hints.Columns.Select(c => DbxSql.Projection(c, byName.GetValueOrDefault(c))).ToList();
+        }
+
+        return schema.HasSerializedColumns
+            ? schema.Columns.Select(c => DbxSql.Projection(c.Name, c.SerializeExpression)).ToList()
+            : [];
     }
 
     private static PzConnectorException Unsupported(DbxRedactor redactor, string text) =>

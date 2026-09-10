@@ -1,4 +1,6 @@
+using Apache.Arrow;
 using Apache.Arrow.Types;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Pz.Connectors.Abstractions;
 
@@ -13,6 +15,15 @@ public sealed class DbxSourceBehaviorTests
         for (var i = 0; i < 10; i++) table.Rows.Add([(long)i, $"n{i}"]);
         fake.Tables["main.sales.orders"] = table;
         return fake;
+    }
+
+    private static FakeTable ComplexTable()
+    {
+        var table = new FakeTable(("id", Int64Type.Default), ("tags", StringType.Default), ("span", StringType.Default))
+            .WithDatabricksType("tags", "ARRAY<INT>", "ARRAY")
+            .WithDatabricksType("span", "INTERVAL DAY", "INTERVAL");
+        table.Rows.Add([1L, "[1,2]", "INTERVAL '1' DAY"]);
+        return table;
     }
 
     private static DbxConnector Connector(FakeDatabricks fake, TimeProvider? time = null) =>
@@ -203,6 +214,97 @@ public sealed class DbxSourceBehaviorTests
         var unauthorized = await Connector(fake).CheckConnectionAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
         Assert.False(unauthorized.Ok);
         Assert.Contains("PZDB0401", unauthorized.Message);
+    }
+
+    [Fact]
+    public async Task Complex_and_interval_columns_are_declared_utf8_and_serialized_in_the_statement()
+    {
+        var fake = NewFake();
+        fake.Tables["main.sales.complex"] = ComplexTable();
+        await using var source = await ((ISourceConnector)Connector(fake)).OpenAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
+
+        var schema = await source.GetSchemaAsync(Spec("complex"), CancellationToken.None);
+        Assert.IsType<StringType>(schema.Schema.GetFieldByName("tags")!.DataType);
+        Assert.IsType<StringType>(schema.Schema.GetFieldByName("span")!.DataType);
+
+        var tags = new List<string>();
+        var spans = new List<string>();
+        foreach (var partition in await source.PlanReadAsync(Spec("complex"), ReadHints.None, CancellationToken.None))
+        {
+            await foreach (var batch in partition.ReadAsync(BatchOptions.Default, CancellationToken.None))
+            {
+                var tagsCol = (StringArray)batch.Column(1);
+                var spanCol = (StringArray)batch.Column(2);
+                for (var i = 0; i < batch.Length; i++)
+                {
+                    tags.Add(tagsCol.GetString(i));
+                    spans.Add(spanCol.GetString(i));
+                }
+
+                batch.Dispose();
+            }
+        }
+
+        Assert.Equal(["[1,2]"], tags);
+        Assert.Equal(["INTERVAL '1' DAY"], spans);
+        Assert.Contains(fake.Statements, s => s.Contains("to_json(`tags`) as `tags`", StringComparison.Ordinal));
+        Assert.Contains(fake.Statements, s => s.Contains("cast(`span` as string) as `span`", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_query_read_over_complex_columns_is_wrapped_as_pz_query()
+    {
+        var fake = NewFake();
+        fake.Tables["main.sales.complex"] = ComplexTable();
+        fake.Queries["select * from sales.complex"] = "main.sales.complex";
+        await using var source = await ((ISourceConnector)Connector(fake)).OpenAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
+
+        await ReadIdsAsync(source, Spec("recent", ("query", "select * from sales.complex")));
+
+        Assert.Equal(
+            "select `id`, to_json(`tags`) as `tags`, cast(`span` as string) as `span` from (select * from sales.complex) as pz_query",
+            fake.Statements[^1]);
+    }
+
+    [Fact]
+    public async Task The_fakes_guard_fires_for_a_bare_unserialized_complex_column()
+    {
+        var fake = NewFake();
+        fake.Tables["main.sales.complex"] = ComplexTable();
+        var errors = new List<string>();
+        var cfg = DbxConnectionConfig.Parse(new ConnectorConfig(fake.ConnectionConfig()), errors)!;
+        var rest = new DbxRestClient(new HttpClient(fake, disposeHandler: false), cfg, new StaticTokenSource("fake-token"), DbxRedactor.None, NullLogger.Instance);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() =>
+            DbxStatement.ExecuteAsync(rest, cfg, "select `tags` from `main`.`sales`.`complex`", null, arrow: true, "test",
+                DbxCodes.Read_StatementFailed, TimeProvider.System, NullLogger.Instance, CancellationToken.None));
+
+        Assert.Contains("UNSERIALIZED_COMPLEX_COLUMN", ex.Message);
+    }
+
+    [Fact]
+    public async Task Timestamp_columns_are_declared_and_served_with_the_Etc_UTC_timezone()
+    {
+        var fake = NewFake();
+        var table = new FakeTable(("id", Int64Type.Default), ("ts", new TimestampType(TimeUnit.Microsecond, "UTC")));
+        table.Rows.Add([1L, DateTimeOffset.UtcNow]);
+        fake.Tables["main.sales.events"] = table;
+        await using var source = await ((ISourceConnector)Connector(fake)).OpenAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
+
+        var schema = await source.GetSchemaAsync(Spec("events"), CancellationToken.None);
+        var declared = Assert.IsType<TimestampType>(schema.Schema.GetFieldByName("ts")!.DataType);
+        Assert.Equal("Etc/UTC", declared.Timezone);
+
+        foreach (var partition in await source.PlanReadAsync(Spec("events"), ReadHints.None, CancellationToken.None))
+        {
+            await foreach (var batch in partition.ReadAsync(BatchOptions.Default, CancellationToken.None))
+            {
+                var actual = Assert.IsType<TimestampType>(batch.Schema.GetFieldByName("ts")!.DataType);
+                Assert.Equal(declared.Unit, actual.Unit);
+                Assert.Equal(declared.Timezone, actual.Timezone);
+                batch.Dispose();
+            }
+        }
     }
 
     /// <summary>Records that the <see cref="HttpClient"/> wrapping it was disposed -- the only way to
