@@ -13,7 +13,8 @@ internal sealed record DbxWriteConfig(TableRef Target)
         var start = errors.Count;
         foreach (var key in spec.Options.Keys.Where(k => !KnownOptions.Contains(k, StringComparer.Ordinal)))
         {
-            errors.Add($"unknown output option '{key}'; known options: {string.Join(", ", KnownOptions)}");
+            errors.Add(DbxCodes.Message(DbxCodes.Write_BadOutputOption, cfg.Redactor,
+                $"unknown output option '{key}'; known options: {string.Join(", ", KnownOptions)}"));
         }
 
         var entityText = spec.Options.TryGetValue("entity", out var v) ? v?.ToString() : null;

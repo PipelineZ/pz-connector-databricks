@@ -30,7 +30,7 @@ public sealed class DbxWriteConfigTests
     {
         var errors = new List<string>();
         Assert.Null(DbxWriteConfig.Parse(Spec("a.b.c.d", ("mode", "x")), Cfg, errors));
-        Assert.Contains(errors, e => e.Contains("unknown output option 'mode'"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0307: ", StringComparison.Ordinal) && e.Contains("unknown output option 'mode'"));
         Assert.Contains(errors, e => e.Contains("'a.b.c.d'"));
     }
 }

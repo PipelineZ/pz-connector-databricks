@@ -4,9 +4,9 @@ namespace Pz.Connector.Databricks.Tests;
 
 public sealed partial class DbxCodesTests
 {
-    // 7 (01xx) + 5 (02xx) + 7 (03xx) + 4 (04xx) consts declared in DbxCodes -- counted by hand and kept
+    // 7 (01xx) + 6 (02xx) + 7 (03xx) + 4 (04xx) consts declared in DbxCodes -- counted by hand and kept
     // in sync with DbxCodes.All whenever a code is added or removed.
-    private const int ExpectedCodeCount = 23;
+    private const int ExpectedCodeCount = 24;
 
     [Fact]
     public void All_codes_are_unique_and_match_the_PZDB_shape()

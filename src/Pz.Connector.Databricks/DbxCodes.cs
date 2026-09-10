@@ -20,6 +20,7 @@ internal static class DbxCodes
     public const string Read_StatementFailed = "PZDB0203";
     public const string Read_ChunkDownloadFailed = "PZDB0204";
     public const string Read_UnknownType = "PZDB0205";
+    public const string Read_BadDatasetOption = "PZDB0206";
 
     // 03xx -- write.
     public const string Write_BadWriteMode = "PZDB0301";
@@ -44,6 +45,7 @@ internal static class DbxCodes
         Config_StagingVolumeInvalid, Config_Invalid,
 
         Read_EntityAndQuery, Read_UnsupportedCursorType, Read_StatementFailed, Read_ChunkDownloadFailed, Read_UnknownType,
+        Read_BadDatasetOption,
 
         Write_BadWriteMode, Write_MergeKeys, Write_UnsupportedArrowType, Write_TargetColumnMissing, Write_UploadFailed,
         Write_TargetStatementFailed, Write_BadOutputOption,

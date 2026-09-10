@@ -14,7 +14,8 @@ internal sealed record DbxReadConfig(TableRef? Table, string? Query)
 
         foreach (var key in spec.Options.Keys.Where(k => !KnownOptions.Contains(k, StringComparer.Ordinal)))
         {
-            errors.Add($"unknown dataset option '{key}'; known options: {string.Join(", ", KnownOptions)}");
+            errors.Add(DbxCodes.Message(DbxCodes.Read_BadDatasetOption, cfg.Redactor,
+                $"unknown dataset option '{key}'; known options: {string.Join(", ", KnownOptions)}"));
         }
 
         var entityText = GetString(spec.Options, "entity");

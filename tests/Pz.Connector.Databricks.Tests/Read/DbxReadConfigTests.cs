@@ -50,7 +50,7 @@ public sealed class DbxReadConfigTests
     {
         var errors = new List<string>();
         Assert.Null(DbxReadConfig.Parse(Spec("a.b.c.d", ("streams", 4)), Cfg, errors));
-        Assert.Contains(errors, e => e.Contains("unknown dataset option 'streams'"));
+        Assert.Contains(errors, e => e.StartsWith("databricks: PZDB0206: ", StringComparison.Ordinal) && e.Contains("unknown dataset option 'streams'"));
         Assert.Contains(errors, e => e.Contains("'a.b.c.d'"));
     }
 }
