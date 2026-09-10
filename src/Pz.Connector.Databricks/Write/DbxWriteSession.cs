@@ -36,6 +36,7 @@ internal sealed class DbxWriteSession(
 
     public async ValueTask<WriteResult> CommitAsync(CancellationToken ct)
     {
+        EnsureNotDisposed();
         if (_state == State.Committed)
         {
             throw new InvalidOperationException("the session is already committed");
@@ -54,7 +55,10 @@ internal sealed class DbxWriteSession(
         {
             var localFiles = await spool.CloseAsync().ConfigureAwait(false);
             var existing = await rest.GetTableAsync(target, $"{context}: looking up {target.FullName}", ct).ConfigureAwait(false);
-            EnsureColumnsPresent(existing, context);
+            if (spec.Mode != "replace")
+            {
+                EnsureColumnsPresent(existing, context);
+            }
 
             for (var i = 0; i < localFiles.Count; i++)
             {
@@ -87,6 +91,7 @@ internal sealed class DbxWriteSession(
 
     public async ValueTask AbortAsync(CancellationToken ct)
     {
+        EnsureNotDisposed();
         if (_state == State.Committed)
         {
             throw new InvalidOperationException("AbortAsync after CommitAsync is not allowed");
@@ -111,8 +116,21 @@ internal sealed class DbxWriteSession(
         _state = State.Disposed;
     }
 
+    /// <summary>Disposal is terminal: it does not reopen the session, and it must not erase the
+    /// verdict a commit or abort already reached -- a second commit after disposal would otherwise
+    /// re-run the whole commit body.</summary>
+    private void EnsureNotDisposed()
+    {
+        if (_state == State.Disposed)
+        {
+            throw new InvalidOperationException("the session is disposed");
+        }
+    }
+
     /// <summary>Every write column must exist on an existing target, compared case-insensitively
-    /// as Databricks compares identifiers. Type differences are left to Spark's insert casts.</summary>
+    /// as Databricks compares identifiers. Type differences are left to Spark's insert casts. Only
+    /// append and merge insert into the target as it stands; replace redefines its schema outright,
+    /// so a column the write does not carry is not a mismatch there.</summary>
     private void EnsureColumnsPresent(DbxTableInfo? existing, string context)
     {
         if (existing is null)

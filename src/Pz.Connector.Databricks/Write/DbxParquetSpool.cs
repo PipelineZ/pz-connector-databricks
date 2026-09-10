@@ -58,8 +58,18 @@ internal class DbxParquetSpool(string dir, IReadOnlyList<DbxColumnPlan> columns,
         }
     }
 
+    /// <summary>Closes the spool and names every file it produced -- always at least one. A session
+    /// that wrote no batch still has to leave a file behind: the commit's target statement reads the
+    /// uploaded directory by path, and a directory that was never created is not an empty scan but a
+    /// failure. The file it gets is schema-only, no row groups, so append and merge are no-ops and
+    /// replace yields an empty table with the right columns.</summary>
     public async Task<IReadOnlyList<string>> CloseAsync()
     {
+        if (_writer is null && _closedFiles.Count == 0)
+        {
+            await EnsureWriterAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+
         await CloseCurrentAsync().ConfigureAwait(false);
         return _closedFiles;
     }

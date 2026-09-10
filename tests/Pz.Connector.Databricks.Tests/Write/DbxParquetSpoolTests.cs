@@ -98,13 +98,27 @@ public sealed class DbxParquetSpoolTests
         spool.Delete();
     }
 
+    // The commit's target statement reads the uploaded directory by path, so a session that wrote
+    // nothing still has to leave one file there: schema-only, no row groups.
     [Fact]
-    public async Task An_empty_spool_closes_to_no_files_and_never_touches_disk()
+    public async Task An_empty_spool_closes_to_one_schema_only_file()
     {
         var spool = new DbxParquetSpool(TempDir(), DbxSchemaMap.Plan(TestSchema, "out"), false, 1);
-        Assert.Empty(await spool.CloseAsync());
-        Assert.False(Directory.Exists(spool.Dir));
+
+        var file = Assert.Single(await spool.CloseAsync());
+
+        Assert.EndsWith("part-00000.parquet", file);
+        await using (var reader = await ParquetReader.CreateAsync(file))
+        {
+            Assert.Equal(0, reader.RowGroupCount);
+            Assert.Equal(["id", "amount", "name", "ts"], reader.Schema.DataFields.Select(f => f.Name));
+        }
+
+        // Closing again adds nothing: the one file is already there.
+        Assert.Single(await spool.CloseAsync());
+
         spool.Delete();
+        Assert.False(Directory.Exists(spool.Dir));
     }
 
     // Databricks reads a naive Parquet TIMESTAMP(MICROS, isAdjustedToUTC=false) column back as plain

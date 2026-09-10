@@ -105,8 +105,46 @@ public sealed class DbxWriteSessionTests
 
         Assert.Equal(0, result.RowsWritten);
         Assert.Contains(fake.Statements, s => s.StartsWith("insert into", StringComparison.Ordinal));
+
+        // The statement reads a real directory: one schema-only file was uploaded, decoded to zero
+        // rows, and cleaned up afterwards.
+        var upload = Assert.Single(fake.Requests, r => r.Method == HttpMethod.Put && r.Url.AbsolutePath.StartsWith("/api/2.0/fs/files/Volumes/", StringComparison.Ordinal));
+        Assert.EndsWith("/part-00000.parquet", upload.Url.AbsolutePath);
         Assert.Empty(fake.Uploads);
         Assert.Empty(fake.Tables["main.sales.orders_out"].Rows);
+    }
+
+    [Fact]
+    public async Task Replace_into_a_target_with_other_columns_redefines_it()
+    {
+        var fake = new FakeDatabricks();
+        fake.Tables["main.sales.orders_out"] = new FakeTable(("id", Int64Type.Default), ("gone", StringType.Default));
+
+        await CommitAsync(fake, Spec("replace"), (1, "a"));
+
+        var table = fake.Tables["main.sales.orders_out"];
+        Assert.Equal(["id", "name"], table.Columns.Select(c => c.Name));
+        Assert.Single(table.Rows);
+    }
+
+    [Fact]
+    public async Task A_disposed_session_rejects_commit_abort_and_writes()
+    {
+        var fake = new FakeDatabricks();
+        await using var sink = await ((ISinkConnector)Connector(fake)).OpenAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
+        var session = await sink.BeginWriteAsync(Spec("append"), IdName, CancellationToken.None);
+        await session.CommitAsync(CancellationToken.None);
+        await session.DisposeAsync();
+        var statements = fake.Statements.Count;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.CommitAsync(CancellationToken.None).AsTask());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.AbortAsync(CancellationToken.None).AsTask());
+        using (var batch = Batch((1, "a")))
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => session.WriteBatchAsync(batch, CancellationToken.None).AsTask());
+        }
+
+        Assert.Equal(statements, fake.Statements.Count);
     }
 
     [Fact]
@@ -151,30 +189,37 @@ public sealed class DbxWriteSessionTests
         var when = new DateTimeOffset(2026, 9, 10, 1, 2, 3, TimeSpan.Zero).AddMicroseconds(7);
 
         var fake = new FakeDatabricks();
+
+        // 'big' targets a BIGINT column, 'huge' the DECIMAL(20,0) a uint64 write column actually
+        // creates -- which the fake declares as STRING, so its digits travel whole.
         fake.Tables["main.sales.wide"] = new FakeTable(
-            ("id", Int64Type.Default), ("amount", StringType.Default), ("big", Int64Type.Default), ("ts", naive));
+            ("id", Int64Type.Default), ("amount", StringType.Default), ("big", Int64Type.Default),
+            ("huge", StringType.Default), ("ts", naive));
 
         var schema = new Schema(
         [
             new Field("id", Int64Type.Default, true),
             new Field("amount", new Decimal128Type(18, 2), true),
             new Field("big", UInt64Type.Default, true),
+            new Field("huge", UInt64Type.Default, true),
             new Field("ts", naive, true),
         ], null);
 
         var ids = new Int64Array.Builder();
         var amounts = new Decimal128Array.Builder(new Decimal128Type(18, 2));
         var bigs = new UInt64Array.Builder();
+        var huges = new UInt64Array.Builder();
         var timestamps = new TimestampArray.Builder(naive);
         ids.Append(1);
         amounts.Append("123.45");
         bigs.Append(9007199254740993UL);
+        huges.Append(ulong.MaxValue);
         timestamps.Append(when);
 
         await using var sink = await ((ISinkConnector)Connector(fake)).OpenAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
         await using var session = await sink.BeginWriteAsync(
             new OutputSpec("dbx", "wide", "append", "fail_on_change", new Dictionary<string, object?>()), schema, CancellationToken.None);
-        using (var batch = new RecordBatch(schema, [ids.Build(), amounts.Build(), bigs.Build(), timestamps.Build()], 1))
+        using (var batch = new RecordBatch(schema, [ids.Build(), amounts.Build(), bigs.Build(), huges.Build(), timestamps.Build()], 1))
         {
             await session.WriteBatchAsync(batch, CancellationToken.None);
         }
@@ -185,6 +230,37 @@ public sealed class DbxWriteSessionTests
         Assert.Equal(1L, row[0]);
         Assert.Equal("123.45", row[1]);
         Assert.Equal(9007199254740993L, row[2]);
-        Assert.Equal(when, row[3]);
+        Assert.Equal("18446744073709551615", row[3]);
+        Assert.Equal(when, row[4]);
+    }
+
+    /// <summary>A uint64 wider than the target's BIGINT is a failed cast on the real service, and the
+    /// fake reproduces that rather than silently truncating: the statement fails with the write code.</summary>
+    [Fact]
+    public async Task A_spooled_value_too_wide_for_the_target_column_fails_the_statement()
+    {
+        var fake = new FakeDatabricks();
+        fake.Tables["main.sales.narrow"] = new FakeTable(("id", Int64Type.Default), ("big", Int64Type.Default));
+
+        var schema = new Schema([new Field("id", Int64Type.Default, true), new Field("big", UInt64Type.Default, true)], null);
+        var ids = new Int64Array.Builder();
+        var bigs = new UInt64Array.Builder();
+        ids.Append(1);
+        bigs.Append(ulong.MaxValue);
+
+        await using var sink = await ((ISinkConnector)Connector(fake)).OpenAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
+        await using var session = await sink.BeginWriteAsync(
+            new OutputSpec("dbx", "narrow", "append", "fail_on_change", new Dictionary<string, object?>()), schema, CancellationToken.None);
+        using (var batch = new RecordBatch(schema, [ids.Build(), bigs.Build()], 1))
+        {
+            await session.WriteBatchAsync(batch, CancellationToken.None);
+        }
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() => session.CommitAsync(CancellationToken.None).AsTask());
+
+        Assert.StartsWith("databricks: PZDB0306: output 'narrow': statement failed", ex.Message);
+        Assert.Contains("[CAST_OVERFLOW] column 'big' does not fit BIGINT", ex.Message);
+        Assert.Empty(fake.Tables["main.sales.narrow"].Rows);
+        Assert.Empty(fake.Uploads);
     }
 }

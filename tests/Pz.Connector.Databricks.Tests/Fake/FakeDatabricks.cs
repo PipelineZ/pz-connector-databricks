@@ -754,7 +754,7 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
                         var row = new object?[table.Columns.Length];
                         for (var c = 0; c < table.Columns.Length; c++)
                         {
-                            row[c] = columns.TryGetValue(table.Columns[c].Name, out var data) ? Coerce(data[r], table.Columns[c].Type) : null;
+                            row[c] = columns.TryGetValue(table.Columns[c].Name, out var data) ? Coerce(data[r], table.Columns[c]) : null;
                         }
 
                         var seq = columns.TryGetValue(DbxSchemaMap.SequenceColumn, out var seqData)
@@ -859,15 +859,17 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
 
     /// <summary>Turns a spooled value into what the target column stores. Decimal and uint64 columns
     /// spool as digit strings and timezone-less timestamps as ISO 8601 microsecond strings, so a
-    /// string arriving at a numeric or timestamp column is parsed, never stored as text.</summary>
-    private static object? Coerce(object? value, IArrowType type)
+    /// string arriving at a numeric or timestamp column is parsed, never stored as text. A digit
+    /// string too wide for the target column is a failed cast, as it is on the real service -- a
+    /// uint64 above <see cref="long.MaxValue"/> needs a DECIMAL(20,0) target, not a BIGINT one.</summary>
+    private static object? Coerce(object? value, (string Name, IArrowType Type) column)
     {
         if (value is null)
         {
             return null;
         }
 
-        switch (type)
+        switch (column.Type)
         {
             case TimestampType:
                 return value switch
@@ -881,11 +883,17 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
             case Date32Type:
                 return value is DateTime date ? date.Date : value;
             case Int64Type:
-                return Convert.ToInt64(value, CultureInfo.InvariantCulture);
+                return value is string text
+                    ? long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var l) ? l : throw CastFailed(column, "BIGINT")
+                    : Convert.ToInt64(value, CultureInfo.InvariantCulture);
             case Int32Type:
-                return Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                return value is string small
+                    ? int.TryParse(small, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i) ? i : throw CastFailed(column, "INT")
+                    : Convert.ToInt32(value, CultureInfo.InvariantCulture);
             case DoubleType:
-                return Convert.ToDouble(value, CultureInfo.InvariantCulture);
+                return value is string real
+                    ? double.TryParse(real, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : throw CastFailed(column, "DOUBLE")
+                    : Convert.ToDouble(value, CultureInfo.InvariantCulture);
             case BooleanType:
                 return Convert.ToBoolean(value, CultureInfo.InvariantCulture);
             case StringType:
@@ -894,6 +902,10 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
                 return value;
         }
     }
+
+    // Names the column and the type it would not fit, never the value: a rejected value is row data.
+    private static FakeSqlException CastFailed((string Name, IArrowType Type) column, string databricksType) =>
+        new($"[CAST_OVERFLOW] column '{column.Name}' does not fit {databricksType}");
 
     [GeneratedRegex(@"^create table if not exists `(?<c>[^`]+)`\.`(?<s>[^`]+)`\.`(?<t>[^`]+)` \((?<cols>.+)\)$", RegexOptions.Singleline)]
     private static partial Regex CreatePattern();
