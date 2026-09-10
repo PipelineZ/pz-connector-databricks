@@ -1,8 +1,10 @@
 namespace Pz.Connector.Databricks;
 
-// The Databricks REST wire shapes this connector touches. Every member is nullable: a partial
-// response must round-trip without a deserialization failure, and DbxJsonContext's WhenWritingNull
-// keeps an unset request field off the wire (absence, never an explicit null, is what is sent).
+// The Databricks REST wire shapes this connector touches. Every member of a response is nullable:
+// the service may omit any field, and a partial response must round-trip without a deserialization
+// failure. A request record instead declares the fields the API requires as non-nullable and the
+// optional ones as nullable, where DbxJsonContext's WhenWritingNull keeps an unset field off the
+// wire (absence, never an explicit null, is what is sent).
 // Property names are PascalCase; the context's snake_case policy maps each onto its wire name.
 
 internal sealed record DbxParameter(string Name, string? Value, string? Type);

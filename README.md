@@ -55,25 +55,28 @@ dbx:
   staging_volume: main.pz.staging                       # required for any write: 3-part UC volume name
 ```
 
-- `host` must be an `https://` URL with no path, query, or fragment -- it is spliced into every
-  request URL.
+- `host` must be an `https://` URL with no user info, path, query, or fragment -- it is spliced
+  into every request URL.
 - `warehouse_id` must match `[a-f0-9]+`.
 - `auth: token` requires `token` and forbids `client_id`/`client_secret`; `auth: oauth` requires
   both `client_id` and `client_secret` and forbids `token`. Violations are `PZDB01xx` before any
   network call.
 - `catalog`/`schema` become the statement's session defaults (the submit request's own `catalog`/
   `schema` fields), so an unqualified name in `query:` resolves exactly as an entity name does.
-- `staging_volume` is validated only when a sink opens: missing or not 3-part is `PZDB0106`. Files
+- `staging_volume` is parsed with the connection and required only when a sink opens: malformed (a
+  backtick, or not exactly 3 parts) or missing is `PZDB0106`. Files
   land under `/Volumes/<catalog>/<schema>/<volume>/pz/<tag>/part-N.parquet`, `tag` a per-session
   random id, so concurrent sinks never collide.
 - `pz connector check` (`CheckConnectionAsync`) looks up the warehouse, then, only when it is
   `RUNNING`, runs `select 1` through it. It reports `warehouse <name> RUNNING`,
   `warehouse <name> is STARTING/STOPPED/STOPPING` (not a failure -- a stopped warehouse starts on
-  the first statement), or the auth failure.
+  the first statement), the auth failure, or, for any other warehouse state, a failure reading
+  `warehouse <name> is <state>`.
 - `token`, `client_secret`, every minted access token, any `Authorization` header value echoed back
   in an error, and presigned chunk URLs (reduced to `https://<host>/<redacted>`, since they carry
-  signatures) are redacted from every message. Statement text is never included in an error, only
-  the entity name.
+  signatures) are redacted from every message. The connector never adds statement text to an error,
+  only the entity name; the service's own error message is passed through and may quote the
+  offending fragment.
 
 ## Naming an entity
 
@@ -114,7 +117,9 @@ service decides to return for that statement, never a count the connector or the
 ### Query mode (`query:`)
 
 `query:` runs arbitrary SQL verbatim -- no pushdown of any kind. `entity:` and `query:` cannot both
-be set on the same read (`PZDB0201`).
+be set on the same read (`PZDB0201`). Where the query is wrapped rather than run on its own -- the
+schema probe, and a read with a serialized column (below) -- surrounding whitespace and a trailing
+`;` are trimmed first, since a statement terminator is a parse error inside a derived table.
 
 ### Incremental reads
 
@@ -153,8 +158,8 @@ query verbatim); a `query:` read with one is instead wrapped as
 `select <projection> from (<query>) as pz_query`. `TIMESTAMP` is declared with time zone
 `"Etc/UTC"`, matching the wire.
 
-An unrecognized Databricks type is `PZDB0205`; an unresolvable dataset option (e.g. `entity` and
-`query` both set, or a key that isn't `entity`/`query`) is `PZDB0206`.
+An unrecognized Databricks type is `PZDB0205`; a dataset option that isn't `entity`/`query` is
+`PZDB0206`.
 
 ## Writing data
 
@@ -255,30 +260,30 @@ Every failure is `databricks: PZDB####: <redacted text>`.
 
 | Code | Meaning |
 |---|---|
-| `PZDB0101` | `host` is missing, not an `https://` URL, or carries a path/query/fragment |
+| `PZDB0101` | `host` is missing, not an `https://` URL, or carries user info, a path, a query or a fragment |
 | `PZDB0102` | `warehouse_id` is missing or not lowercase hexadecimal |
 | `PZDB0103` | `auth` is missing or not one of `token`/`oauth`, or its required credential(s) are missing/extra |
 | `PZDB0104` | an entity name can't be resolved (no default `catalog`/`schema` on the connection) |
-| `PZDB0105` | an entity or volume name contains a backtick |
-| `PZDB0106` | `staging_volume` is missing or not a 3-part `catalog.schema.volume` name |
-| `PZDB0107` | the connection config failed validation (aggregate) |
+| `PZDB0105` | an entity name contains a backtick |
+| `PZDB0106` | `staging_volume` is malformed, or is missing when a sink opens (a 3-part `catalog.schema.volume` name) |
+| `PZDB0107` | an unknown connection key, or another invalid connection option (an empty `catalog`/`schema`) |
 | `PZDB0201` | a read sets both `entity` and `query` |
 | `PZDB0202` | the incremental cursor column is absent from the schema, has no statement-parameter type, or is a serialized (JSON/string-cast) column |
 | `PZDB0203` | the statement failed, was canceled, or the schema probe returned no manifest |
-| `PZDB0204` | a chunk's external link could not be fetched after one retry (expired signature) |
+| `PZDB0204` | a chunk's external link could not be fetched after one retry (expired signature), or its body arrived but does not decode as an Arrow stream |
 | `PZDB0205` | a Databricks column type has no Arrow mapping |
-| `PZDB0206` | a read dataset option is unknown, or `entity`/`query` are both invalid |
+| `PZDB0206` | a read dataset option is unknown |
 | `PZDB0301` | an unsupported write mode reached the sink (only `append`/`replace`/`merge`) |
 | `PZDB0302` | `merge` mode has no keys, a merge key is absent from the write schema, or the write schema uses the reserved column `_pz_seq` |
 | `PZDB0303` | an Arrow column type has no Databricks/Parquet mapping |
 | `PZDB0304` | the existing target is missing a column the write needs (`fail_on_change`) |
-| `PZDB0305` | uploading a spool file to the staging volume failed |
+| `PZDB0305` | uploading a spool file to the staging volume failed; it inherits the transience of the HTTP failure underneath it |
 | `PZDB0306` | the target statement (insert/replace/merge) failed |
 | `PZDB0307` | a write output option is unknown, or `schema_policy: evolve` was requested |
 | `PZDB0401` | `401`/`403` -- check the token or the service principal's permissions on the warehouse and catalog |
-| `PZDB0402` | an HTTP failure from the workspace: `429`/`502`/`503`/`504` or a network failure before any response are transient; any other status (`400`, `404`, `409`, `500`, ...) carries the same code and is not retried |
+| `PZDB0402` | an HTTP failure. From the workspace: `429`/`502`/`503`/`504` or a network failure before any response are transient, while any other status (`400`, `404`, `409`, `500`, ...) carries the same code and is not retried. From a presigned chunk link, `429` and every `5xx` are transient (the storage service, not the control plane, answered) |
 | `PZDB0403` | the OAuth token endpoint refused the client credentials |
-| `PZDB0404` | the warehouse is unavailable while `select 1` is checked, or a statement-side transient condition (starting warehouse, busy cluster) -- transient |
+| `PZDB0404` | a statement-side transient condition (starting warehouse, busy cluster) -- transient. The same code is also raised non-transient for the `select 1` a connection check runs: no statement id came back, or it ended in a failed state |
 
 ## Development
 

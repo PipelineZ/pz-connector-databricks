@@ -270,12 +270,9 @@ public sealed class LiveDatabricksFacts
         Assert.Empty(leftovers);
     }
 
-    // A session that never calls WriteBatchAsync stages a schema-only Parquet file (no row groups)
-    // so the target statement's `parquet.`<dir>/`` source always reads a real, uploaded directory --
-    // DbxParquetSpool.CloseAsync's fallback, landed on this branch during this task's own live run
-    // as the task 14 review's fix for the failure this suite was written to catch (a directory that
-    // was never created is not an empty scan but a Databricks path-not-found error). All three facts
-    // below pass with that fix in place; see the report for the timeline.
+    // A session that never calls WriteBatchAsync stages a schema-only Parquet file (no row groups) so
+    // the target statement's `parquet.`<dir>/`` source always reads a real, uploaded directory: a
+    // directory that was never created is not an empty scan but a Databricks path-not-found error.
     [SkippableFact]
     public async Task Empty_append_is_a_no_op()
     {
