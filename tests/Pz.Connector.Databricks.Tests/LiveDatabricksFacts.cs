@@ -101,9 +101,14 @@ public sealed class LiveDatabricksFacts
         await using var source = await ((ISourceConnector)Connector()).OpenAsync(new ConnectorConfig(live.Config), CancellationToken.None);
         var spec = new DatasetSpec("databricks", "big", new Dictionary<string, object?>());
         // Pruned to just `id` (8 bytes * 400,000 rows =~ 3.2MB), the result stayed under the
-        // service's chunk threshold and came back as a single chunk -- pruning is already proven
-        // offline (DbxSourceBehaviorTests.Watermark_and_pruning_reach_the_statement); reading both
-        // columns here (~84MB) is what actually forces a multi-chunk result.
+        // service's chunk threshold and came back as a single chunk -- pruning pushdown is proven
+        // live by Pruning_predicate_and_query_mode_reach_the_statement instead, on a small table
+        // where staying inside one chunk is the point. Reading both columns here -- an 8-byte `id`
+        // plus a 200-char `pad` string, roughly 208 bytes/row * 400,000 rows =~ 84MB -- is sized to
+        // sit well above the service's per-chunk size (the pruned ~3.2MB variant above did not cross
+        // it). If a future service change raises the per-chunk threshold past ~84MB, this fact starts
+        // failing with "expected several chunks, got 1"; the fix is to grow the table further, not
+        // the assertion.
         var partitions = await source.PlanReadAsync(spec, ReadHints.None, CancellationToken.None);
         Assert.True(partitions.Count > 1, $"expected several chunks, got {partitions.Count}");
 
@@ -146,6 +151,57 @@ public sealed class LiveDatabricksFacts
         }
 
         Assert.Equal([3, 4, 5], ids.OrderBy(i => i));
+    }
+
+    [SkippableFact]
+    public async Task Pruning_predicate_and_query_mode_reach_the_statement()
+    {
+        SkipUnlessLive();
+        await using var live = new Live();
+        await live.InitAsync();
+        await live.SqlAsync($"create table `{live.Catalog}`.`{live.Schema}`.`pq` as select id, concat('n', cast(id as string)) as name from range(0, 10) t(id)");
+
+        await using var source = await ((ISourceConnector)Connector()).OpenAsync(new ConnectorConfig(live.Config), CancellationToken.None);
+
+        // 1. Column pruning + predicate pushdown: the returned batches carry only the pruned
+        // column, and the row count matches a direct server-side count with the same predicate --
+        // proof the predicate actually reached the statement rather than being filtered locally.
+        var expected = long.Parse((await live.RowsAsync("select count(*) from pq where id > 2"))[0][0]!);
+        var prunedSpec = new DatasetSpec("databricks", "pq", new Dictionary<string, object?>());
+        var ids = new List<long>();
+        foreach (var partition in await source.PlanReadAsync(prunedSpec, new ReadHints(Columns: ["id"], PredicateSql: "id > 2"), CancellationToken.None))
+        {
+            await foreach (var batch in partition.ReadAsync(BatchOptions.Default, CancellationToken.None))
+            {
+                Assert.Single(batch.Schema.FieldsList);
+                Assert.Equal("id", batch.Schema.FieldsList[0].Name);
+                var col = (Int64Array)batch.Column(0);
+                for (var i = 0; i < col.Length; i++) ids.Add(col.GetValue(i)!.Value);
+                batch.Dispose();
+            }
+        }
+
+        Assert.Equal(expected, ids.Count);
+        Assert.All(ids, id => Assert.True(id > 2));
+
+        // 2. Query mode: the dataset's SQL runs verbatim, with no pushdown of any kind.
+        var querySpec = new DatasetSpec("databricks", "pq_query", new Dictionary<string, object?>
+        {
+            ["query"] = "select id, name from pq where id <= 2",
+        });
+        var rows = new List<(long Id, string Name)>();
+        foreach (var partition in await source.PlanReadAsync(querySpec, ReadHints.None, CancellationToken.None))
+        {
+            await foreach (var batch in partition.ReadAsync(BatchOptions.Default, CancellationToken.None))
+            {
+                var idCol = (Int64Array)batch.Column(0);
+                var nameCol = (StringArray)batch.Column(1);
+                for (var i = 0; i < batch.Length; i++) rows.Add((idCol.GetValue(i)!.Value, nameCol.GetString(i)));
+                batch.Dispose();
+            }
+        }
+
+        Assert.Equal([(0L, "n0"), (1L, "n1"), (2L, "n2")], rows.OrderBy(r => r.Id));
     }
 
     [SkippableFact]
