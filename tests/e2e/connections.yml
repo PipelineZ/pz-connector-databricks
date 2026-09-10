@@ -1,0 +1,19 @@
+# Both directions through the packaged connector against a real workspace: read a seeded table,
+# write an append output. Every value comes from the environment CI exports.
+dbx:
+  connector: databricks
+  host: ${PZ_DATABRICKS_HOST}
+  warehouse_id: ${PZ_DATABRICKS_WAREHOUSE_ID}
+  auth: token
+  token: ${PZ_DATABRICKS_TOKEN}
+  catalog: ${PZ_DATABRICKS_CATALOG}
+  schema: ${PZ_DATABRICKS_SCHEMA}
+  staging_volume: ${PZ_DATABRICKS_STAGING_VOLUME}
+  entities:
+    orders_in:
+      read:
+        entity: orders_in
+    orders_out:
+      write:
+        entity: orders_out
+        strategy: append
