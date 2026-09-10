@@ -32,7 +32,7 @@ internal sealed class OAuthTokenSource(HttpClient http, DbxConnectionConfig cfg,
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (_token is not null && time.GetUtcNow() + RefreshMargin < _expiresAt)
+            if (_token is not null && time.GetUtcNow() + RefreshMargin <= _expiresAt)
             {
                 return _token;
             }
@@ -59,24 +59,15 @@ internal sealed class OAuthTokenSource(HttpClient http, DbxConnectionConfig cfg,
             ["scope"] = "all-apis",
         });
 
-        HttpResponseMessage response;
-        string body;
+        // response is declared outside the try so a failure between SendAsync succeeding and the
+        // method returning (e.g. the content stream throwing mid-read) still disposes it in finally
+        // -- the earlier "using (response)" only wrapped the body below and never ran on that path.
+        HttpResponseMessage? response = null;
         try
         {
             response = await http.SendAsync(request, ct).ConfigureAwait(false);
-            body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Net.Sockets.SocketException)
-        {
-            throw DbxErrors.Wrap(ex, redactor, "minting an OAuth token");
-        }
+            var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
 
-        using (response)
-        {
             if (!response.IsSuccessStatusCode)
             {
                 throw Refused($"HTTP {(int)response.StatusCode}: {body}");
@@ -99,6 +90,18 @@ internal sealed class OAuthTokenSource(HttpClient http, DbxConnectionConfig cfg,
 
             redactor.AddSecret(token);
             return (token, parsed.ExpiresIn ?? 3600);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Net.Sockets.SocketException)
+        {
+            throw DbxErrors.Wrap(ex, redactor, "minting an OAuth token");
+        }
+        finally
+        {
+            response?.Dispose();
         }
     }
 

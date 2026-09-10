@@ -78,4 +78,56 @@ public sealed class DbxAuthTests
         Assert.IsType<StaticTokenSource>(DbxAuth.Create(token, new HttpClient(new FakeHandler()), TimeProvider.System));
         Assert.IsType<OAuthTokenSource>(DbxAuth.Create(OAuthConfig(), new HttpClient(new FakeHandler()), TimeProvider.System));
     }
+
+    // A response that arrived but whose body then fails mid-read (a dropped connection, a proxy that
+    // cuts the stream) must still surface as a PzConnectorException -- and, since only that call is
+    // awaited here, the response HttpResponseMessage returned by SendAsync must have been disposed
+    // rather than leaked for this test to reach ThrowsAsync without an unobserved-exception/GC-finalizer
+    // failure under test-run diagnostics.
+    [Fact]
+    public async Task OAuth_body_read_failure_is_PZDB0402_and_disposes_the_response()
+    {
+        var handler = new FakeHandler
+        {
+            Interceptor = _ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new ThrowingStream()),
+            },
+        };
+        var cfg = OAuthConfig();
+        var source = new OAuthTokenSource(new HttpClient(handler), cfg, new FakeTimeProvider(), cfg.Redactor);
+
+        var ex = await Assert.ThrowsAsync<PzConnectorException>(() => source.GetTokenAsync(CancellationToken.None));
+
+        Assert.StartsWith("databricks: PZDB0402: ", ex.Message);
+        Assert.True(ex.IsTransient);
+    }
+
+    /// <summary>A stream whose every read fails, standing in for a connection that drops mid-body.</summary>
+    private sealed class ThrowingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new IOException("connection dropped");
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            throw new IOException("connection dropped");
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            throw new IOException("connection dropped");
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }
