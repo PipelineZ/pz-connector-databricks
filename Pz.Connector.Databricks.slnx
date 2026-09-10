@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Pz.Connector.Databricks/Pz.Connector.Databricks.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Pz.Connector.Databricks.Tests/Pz.Connector.Databricks.Tests.csproj" />
+  </Folder>
+</Solution>

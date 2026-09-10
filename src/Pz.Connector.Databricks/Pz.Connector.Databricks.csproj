@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <Description>Databricks source (SQL Statement Execution API, Arrow) and sink (Unity Catalog volume staging; append/replace/merge) connector for PipelineZ (pz), served out of process.</Description>
+    <!-- Native AOT. PublishAot is set here as well as by PzPackaging: through the NuGet package the
+         SDK's derivation lands after restore has already decided whether to pull the ILCompiler
+         pack, and a publish without it silently falls back to a non-AOT layout. -->
+    <PzPackaging>aot</PzPackaging>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Pz.Connectors.Sdk" Version="0.6.0" />
+    <PackageReference Include="Pz.Connectors.Abstractions" Version="0.6.0" />
+    <PackageReference Include="Parquet.Net" Version="6.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pz.Connector.Databricks.Tests" />
+  </ItemGroup>
+
+  <!-- First-party code is held to zero trim/AOT warnings by the compile-time analyzers under
+       TreatWarningsAsErrors; what is demoted here is only the ILC-stage per-assembly rollup
+       (IL2104/IL3053) for Parquet.Net's own assembly, whose internals this repository cannot fix
+       (same precedent as pz's own connectors for third-party dependency stacks). -->
+  <PropertyGroup Condition="'$(PublishAot)' == 'true'">
+    <ILLinkTreatWarningsAsErrors>false</ILLinkTreatWarningsAsErrors>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);IL2104;IL3053</WarningsNotAsErrors>
+    <MSBuildWarningsNotAsErrors>$(MSBuildWarningsNotAsErrors);IL2104;IL3053</MSBuildWarningsNotAsErrors>
+  </PropertyGroup>
+
+</Project>

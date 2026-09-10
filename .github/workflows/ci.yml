@@ -1,0 +1,105 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+# No job here writes to the repository, publishes a package or mints a token; the default token is
+# narrowed to the checkout it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build Pz.Connector.Databricks.slnx -c Release
+      # LiveDatabricks needs a real workspace and credentials neither runner has, so both legs
+      # exclude it -- it stays a local/manual suite.
+      - run: >
+          dotnet test Pz.Connector.Databricks.slnx -c Release --no-build --filter "Category!=LiveDatabricks"
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type mini
+
+  # The other half of the proof: a stranger declares the connector by package id, runs `pz restore`,
+  # and pz spawns the Native AOT binary. The suite above never touches pz's resolver, materializer
+  # or process host; this job proves the AOT publish, the generated manifest and the PCP handshake
+  # fit together against the released pz, with a live node (the real workspace) on both ends.
+  pack-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish the host RID (Native AOT) and pack
+        run: |
+          set -euo pipefail
+          # A separate `restore -r` before `publish -r --no-restore` is required on a cold NuGet
+          # cache: the restore folded into `publish -r` alone does not pull the RID-specific packs
+          # this build needs (NETSDK1112), even though the same restore run standalone does.
+          dotnet restore src/Pz.Connector.Databricks -r linux-x64
+          dotnet publish src/Pz.Connector.Databricks -c Release -r linux-x64 --no-restore
+          dotnet pack src/Pz.Connector.Databricks -c Release -o packages
+          ls packages
+          VERSION="$(ls packages/Pz.Connector.Databricks.*.nupkg | sed -E 's|.*/Pz\.Connector\.Databricks\.(.*)\.nupkg|\1|')"
+          echo "PKG_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          unzip -p "packages/Pz.Connector.Databricks.${VERSION}.nupkg" pz.connector.json | tee manifest.json
+          grep -q '"runtime": "process"' manifest.json
+          grep -q '"name": "databricks"' manifest.json
+          for cap in ColumnPruning PredicatePushdown BoundedWindow InclusiveWatermarkBound PartitionedRead Merge ReplaceWrites Transactional; do
+            grep -q "\"${cap}\"" manifest.json
+          done
+      - name: Install pz, restore from the local feed, run, conformance-test
+        env:
+          PZ_DATABRICKS_HOST: ${{ secrets.PZ_DATABRICKS_HOST }}
+          PZ_DATABRICKS_WAREHOUSE_ID: ${{ secrets.PZ_DATABRICKS_WAREHOUSE_ID }}
+          PZ_DATABRICKS_TOKEN: ${{ secrets.PZ_DATABRICKS_TOKEN }}
+          PZ_DATABRICKS_CATALOG: ${{ vars.PZ_DATABRICKS_CATALOG }}
+          PZ_DATABRICKS_SCHEMA: pz_e2e_${{ github.run_id }}
+          PZ_DATABRICKS_STAGING_VOLUME: ${{ vars.PZ_DATABRICKS_STAGING_VOLUME }}
+        run: |
+          set -euo pipefail
+          dotnet tool install --global pz --version 0.6.0
+          cd tests/e2e
+          sed -i "s/0.0.0-PLACEHOLDER/${PKG_VERSION}/" project.yml
+          pz restore --feeds "${GITHUB_WORKSPACE}/packages"
+          PKG_DIR=".pz/packages/Pz.Connector.Databricks/${PKG_VERSION}"
+          test -f "${PKG_DIR}/native/Pz.Connector.Databricks"
+          if [ -z "${PZ_DATABRICKS_HOST}" ]; then
+            echo "no workspace secrets on this run (fork PR?): restore + manifest proven, skipping the live run"
+            exit 0
+          fi
+          sql() {
+            curl -sf -X POST "${PZ_DATABRICKS_HOST}/api/2.0/sql/statements" \
+              -H "Authorization: Bearer ${PZ_DATABRICKS_TOKEN}" -H 'Content-Type: application/json' \
+              -d "{\"warehouse_id\":\"${PZ_DATABRICKS_WAREHOUSE_ID}\",\"statement\":$(printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"wait_timeout\":\"50s\"}"
+          }
+          trap 'sql "drop schema if exists ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA} cascade" >/dev/null' EXIT
+          sql "create schema ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA}" >/dev/null
+          sql "create table ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA}.orders_in as select * from values (1,'ann'),(2,'bob'),(3,'cy') t(id, name)" >/dev/null
+          pz run
+          count() { sql "select count(*) from ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA}.orders_out" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['data_array'][0][0])"; }
+          test "$(count)" -eq 3
+          # Append is at-least-once: a second run lands the three again and stays green.
+          pz run
+          test "$(count)" -eq 6
+          pz connector test "${PKG_DIR}" --config probe.yml | tee report.txt
+          ! grep -q FAIL report.txt
