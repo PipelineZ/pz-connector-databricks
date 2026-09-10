@@ -76,6 +76,8 @@ public sealed class DbxParquetSpoolTests
             Assert.Equal(10, (ts[r]!.Value - ts[r - 1]!.Value).Ticks); // one microsecond == 10 ticks
         }
 
+        group.Dispose();
+        await reader.DisposeAsync(); // Windows refuses to delete a file a reader still holds open.
         spool.Delete();
         Assert.False(Directory.Exists(spool.Dir));
     }
@@ -95,6 +97,8 @@ public sealed class DbxParquetSpoolTests
         await group.ReadAsync(reader.Schema.DataFields[2], names, null);
         Assert.Null(names[0]);
         Assert.Equal("n1", names[1]);
+        group.Dispose();
+        await reader.DisposeAsync(); // Windows refuses to delete a file a reader still holds open.
         spool.Delete();
     }
 
@@ -154,6 +158,8 @@ public sealed class DbxParquetSpoolTests
         Assert.Equal("2026-09-10T13:45:30.123456", values[0]);
         Assert.Null(values[1]);
 
+        group.Dispose();
+        await reader.DisposeAsync(); // Windows refuses to delete a file a reader still holds open.
         spool.Delete();
     }
 
@@ -210,6 +216,8 @@ public sealed class DbxParquetSpoolTests
         Assert.Equal(new DateTime(2026, 9, 10), d[0]!.Value);
         Assert.Null(d[1]);
 
+        group.Dispose();
+        await reader.DisposeAsync(); // Windows refuses to delete a file a reader still holds open.
         spool.Delete();
     }
 }
