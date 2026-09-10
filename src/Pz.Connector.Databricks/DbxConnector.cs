@@ -8,7 +8,7 @@ namespace Pz.Connector.Databricks;
 /// <summary>Databricks for pz: a source reads a table or a query result through the SQL Statement
 /// Execution API as Arrow; a sink stages Parquet in a Unity Catalog volume and lands rows with one
 /// append/replace/merge statement.</summary>
-public sealed class DbxConnector : IConnector, ISourceConnector
+public sealed class DbxConnector : IConnector, ISourceConnector, ISinkConnector
 {
     private readonly ILoggerFactory _loggerFactory;
     private readonly TimeProvider _time;
@@ -81,6 +81,18 @@ public sealed class DbxConnector : IConnector, ISourceConnector
         // here on: the engine disposes the source exactly once, and that is what closes it.
         return ValueTask.FromResult<ISource>(
             new DbxSource(connection, rest, _time, _loggerFactory.CreateLogger<DbxSource>(), httpClient));
+    }
+
+    ValueTask<ISink> ISinkConnector.OpenAsync(ConnectorConfig config, CancellationToken ct)
+    {
+        var connection = ParseOrThrow(config);
+        var httpClient = _httpClientFactory();
+        var (_, rest) = OpenRest(connection, httpClient);
+
+        // The client (and with it the connection pool behind its handler) belongs to the sink from
+        // here on: the engine disposes the sink exactly once, and that is what closes it.
+        return ValueTask.FromResult<ISink>(
+            new DbxSink(connection, rest, _time, _loggerFactory.CreateLogger<DbxSink>(), _spoolRollBytes, httpClient));
     }
 
     /// <summary>Proves the credential and the warehouse: the warehouse lookup needs a valid token,

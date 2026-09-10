@@ -3,6 +3,9 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Apache.Arrow.Types;
+using Parquet;
+using Parquet.Schema;
 
 namespace Pz.Connector.Databricks.Tests;
 
@@ -598,6 +601,317 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
     [GeneratedRegex(@"`(?<c>[^`]+)` <= :pz_upper")]
     private static partial Regex UpperPattern();
 
-    // The write statement shapes land with the sink; until then nothing is a write.
-    private static bool TryExecuteWrite(Statement statement, string sql) => false;
+    /// <summary>Recognizes the write statement shapes <c>DbxSql</c> generates. A select-list item is
+    /// mapped onto the target's column of the same name and the spooled value converted to that
+    /// column's own Arrow type -- the cast's declared type name is not read, so a target column's
+    /// type is the single authority for what a string-spooled value becomes.</summary>
+    private bool TryExecuteWrite(Statement statement, string sql)
+    {
+        var create = CreatePattern().Match(sql);
+        if (create.Success)
+        {
+            var key = Key(create);
+            if (!Tables.ContainsKey(key))
+            {
+                var cols = create.Groups["cols"].Value.Split(", ").Select(c =>
+                {
+                    var parts = c.Split(' ', 2);
+                    return (parts[0].Trim('`'), TypeOf(parts[1]));
+                }).ToArray();
+                Tables[key] = new FakeTable(cols);
+            }
+
+            statement.Inline = [];
+            return true;
+        }
+
+        var insert = InsertPattern().Match(sql);
+        if (insert.Success)
+        {
+            var table = Tables.TryGetValue(Key(insert), out var t) ? t : throw new FakeSqlException($"[TABLE_OR_VIEW_NOT_FOUND] {Key(insert)}");
+            table.Rows.AddRange(ReadUploads(insert.Groups["dir"].Value, table, Columns(insert.Groups["sel"].Value)));
+            statement.Inline = [];
+            return true;
+        }
+
+        var replace = ReplacePattern().Match(sql);
+        if (replace.Success)
+        {
+            var names = Columns(replace.Groups["sel"].Value);
+            var fresh = new FakeTable(names.Select(n => (n, ColumnTypeFromUploads(replace.Groups["dir"].Value, n))).ToArray());
+            fresh.Rows.AddRange(ReadUploads(replace.Groups["dir"].Value, fresh, names));
+            Tables[Key(replace)] = fresh;
+            statement.Inline = [];
+            return true;
+        }
+
+        var merge = MergePattern().Match(sql);
+        if (merge.Success)
+        {
+            var table = Tables.TryGetValue(Key(merge), out var t) ? t : throw new FakeSqlException($"[TABLE_OR_VIEW_NOT_FOUND] {Key(merge)}");
+            var keys = MergeKeyPattern().Matches(merge.Groups["on"].Value).Select(m => m.Groups["k"].Value).ToArray();
+            var names = Columns(merge.Groups["sel"].Value);
+            var staged = ReadUploadsWithSequence(merge.Groups["dir"].Value, table, names);
+            var last = staged
+                .GroupBy(r => KeyOf(table, keys, r.Row), StringComparer.Ordinal)
+                .Select(g => g.OrderByDescending(r => r.Seq).First().Row);
+            foreach (var row in last)
+            {
+                var identity = KeyOf(table, keys, row);
+                var idx = table.Rows.FindIndex(existing => string.Equals(KeyOf(table, keys, existing), identity, StringComparison.Ordinal));
+                if (idx >= 0)
+                {
+                    table.Rows[idx] = row;
+                }
+                else
+                {
+                    table.Rows.Add(row);
+                }
+            }
+
+            statement.Inline = [];
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>A row's merge identity: the key columns' rendered values, with a null distinguishable
+    /// from every value -- <c>&lt;=&gt;</c> matches two nulls, so two null keys must collide here too.</summary>
+    private static string KeyOf(FakeTable table, string[] keys, object?[] row) =>
+        string.Join("", keys.Select(k =>
+        {
+            var index = System.Array.FindIndex(table.Columns, c => string.Equals(c.Name, k, StringComparison.OrdinalIgnoreCase));
+            return row[index] is { } value ? "=" + Convert.ToString(value, CultureInfo.InvariantCulture) : "null";
+        }));
+
+    private static string Key(Match m) => $"{m.Groups["c"].Value}.{m.Groups["s"].Value}.{m.Groups["t"].Value}";
+
+    private static string[] Columns(string selection) =>
+        SelectColumnPattern().Matches(selection).Select(m => m.Groups["alias"].Success ? m.Groups["alias"].Value : m.Groups["col"].Value).ToArray();
+
+    private static IArrowType TypeOf(string databricksType) => databricksType.Split('(')[0] switch
+    {
+        "BIGINT" => Int64Type.Default,
+        "INT" => Int32Type.Default,
+        "STRING" => StringType.Default,
+        "DOUBLE" => DoubleType.Default,
+        "BOOLEAN" => BooleanType.Default,
+        "TIMESTAMP" => new TimestampType(TimeUnit.Microsecond, "UTC"),
+        "TIMESTAMP_NTZ" => new TimestampType(TimeUnit.Microsecond, (string?)null),
+        "DATE" => Date32Type.Default,
+        _ => StringType.Default,
+    };
+
+    private IArrowType ColumnTypeFromUploads(string dir, string column)
+    {
+        foreach (var (_, bytes) in UploadsUnder(dir))
+        {
+            var clrType = ReadParquet(bytes, reader => reader.Schema.DataFields.FirstOrDefault(f => f.Name == column)?.ClrType);
+            if (clrType is null)
+            {
+                continue;
+            }
+
+            return clrType == typeof(long) ? Int64Type.Default
+                : clrType == typeof(int) ? Int32Type.Default
+                : clrType == typeof(double) ? DoubleType.Default
+                : clrType == typeof(bool) ? BooleanType.Default
+                : StringType.Default;
+        }
+
+        return StringType.Default;
+    }
+
+    private List<object?[]> ReadUploads(string dir, FakeTable table, string[] names) =>
+        ReadUploadsWithSequence(dir, table, names).Select(r => r.Row).ToList();
+
+    /// <summary>Decodes every uploaded Parquet file under <paramref name="dir"/> into rows shaped
+    /// like <paramref name="table"/>'s columns (by name; a selected column the table lacks is an
+    /// error, a table column the file lacks is null), carrying <c>_pz_seq</c> when present.</summary>
+    private List<(object?[] Row, long Seq)> ReadUploadsWithSequence(string dir, FakeTable table, string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (System.Array.FindIndex(table.Columns, c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)) < 0)
+            {
+                throw new FakeSqlException($"[UNRESOLVED_COLUMN] {name}");
+            }
+        }
+
+        var rows = new List<(object?[] Row, long Seq)>();
+        foreach (var (_, bytes) in UploadsUnder(dir))
+        {
+            ReadParquet(bytes, reader =>
+            {
+                for (var g = 0; g < reader.RowGroupCount; g++)
+                {
+                    using var group = reader.OpenRowGroupReader(g);
+                    var count = (int)group.RowCount;
+                    var columns = reader.Schema.DataFields.ToDictionary(f => f.Name, f => ReadColumn(group, f, count), StringComparer.OrdinalIgnoreCase);
+                    for (var r = 0; r < count; r++)
+                    {
+                        var row = new object?[table.Columns.Length];
+                        for (var c = 0; c < table.Columns.Length; c++)
+                        {
+                            row[c] = columns.TryGetValue(table.Columns[c].Name, out var data) ? Coerce(data[r], table.Columns[c].Type) : null;
+                        }
+
+                        var seq = columns.TryGetValue(DbxSchemaMap.SequenceColumn, out var seqData)
+                            ? Convert.ToInt64(seqData[r], CultureInfo.InvariantCulture)
+                            : r;
+                        rows.Add((row, seq));
+                    }
+                }
+
+                return true;
+            });
+        }
+
+        return rows;
+    }
+
+    private IEnumerable<KeyValuePair<string, byte[]>> UploadsUnder(string dir) =>
+        Uploads.Where(u => u.Key.StartsWith(dir + "/", StringComparison.Ordinal)).OrderBy(u => u.Key, StringComparer.Ordinal);
+
+    /// <summary>Opens one uploaded Parquet file and hands it to <paramref name="read"/>.
+    /// <see cref="ParquetReader"/> is asynchronously disposable only, and statement execution here is
+    /// synchronous, so the open/close pair is bridged once here rather than at every call site.</summary>
+    private static T ReadParquet<T>(byte[] bytes, Func<ParquetReader, T> read)
+    {
+        using var stream = new MemoryStream(bytes);
+        var reader = ParquetReader.CreateAsync(stream).GetAwaiter().GetResult();
+        try
+        {
+            return read(reader);
+        }
+        finally
+        {
+            reader.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+    }
+
+    /// <summary>One Parquet column of one row group as boxed values. Dispatch is over the field's
+    /// declared CLR type: every read goes through a typed overload, because the reader offers no
+    /// untyped one.</summary>
+    private static object?[] ReadColumn(ParquetRowGroupReader group, DataField field, int rows)
+    {
+        if (field.ClrType == typeof(string))
+        {
+            var text = new string?[rows];
+            group.ReadAsync(field, text.AsMemory(), null).AsTask().GetAwaiter().GetResult();
+            return [.. text.Select(v => (object?)v)];
+        }
+
+        if (field.ClrType == typeof(byte[]))
+        {
+            var blobs = new byte[]?[rows];
+            group.ReadAsync(field, blobs.AsMemory(), null).AsTask().GetAwaiter().GetResult();
+            return [.. blobs.Select(v => (object?)v)];
+        }
+
+        if (field.ClrType == typeof(long))
+        {
+            return ReadValues<long>(group, field, rows);
+        }
+
+        if (field.ClrType == typeof(int))
+        {
+            return ReadValues<int>(group, field, rows);
+        }
+
+        if (field.ClrType == typeof(double))
+        {
+            return ReadValues<double>(group, field, rows);
+        }
+
+        if (field.ClrType == typeof(float))
+        {
+            return ReadValues<float>(group, field, rows);
+        }
+
+        if (field.ClrType == typeof(bool))
+        {
+            return ReadValues<bool>(group, field, rows);
+        }
+
+        if (field.ClrType == typeof(DateTime))
+        {
+            return ReadValues<DateTime>(group, field, rows);
+        }
+
+        throw new FakeSqlException($"[UNSUPPORTED_PARQUET_TYPE] column '{field.Name}' is {field.ClrType.Name}");
+    }
+
+    private static object?[] ReadValues<T>(ParquetRowGroupReader group, DataField field, int rows) where T : struct
+    {
+        if (field.IsNullable)
+        {
+            var nullable = new T?[rows];
+            group.ReadAsync<T>(field, nullable.AsMemory(), null).AsTask().GetAwaiter().GetResult();
+            return [.. nullable.Select(v => v.HasValue ? (object?)v.Value : null)];
+        }
+
+        var values = new T[rows];
+        group.ReadAsync<T>(field, values.AsMemory(), null).AsTask().GetAwaiter().GetResult();
+        return [.. values.Select(v => (object?)v)];
+    }
+
+    /// <summary>Turns a spooled value into what the target column stores. Decimal and uint64 columns
+    /// spool as digit strings and timezone-less timestamps as ISO 8601 microsecond strings, so a
+    /// string arriving at a numeric or timestamp column is parsed, never stored as text.</summary>
+    private static object? Coerce(object? value, IArrowType type)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        switch (type)
+        {
+            case TimestampType:
+                return value switch
+                {
+                    DateTimeOffset dto => dto,
+                    DateTime dt => new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc)),
+                    string s => new DateTimeOffset(DateTime.SpecifyKind(
+                        DateTime.ParseExact(s, "yyyy-MM-ddTHH:mm:ss.ffffff", CultureInfo.InvariantCulture), DateTimeKind.Utc)),
+                    _ => value,
+                };
+            case Date32Type:
+                return value is DateTime date ? date.Date : value;
+            case Int64Type:
+                return Convert.ToInt64(value, CultureInfo.InvariantCulture);
+            case Int32Type:
+                return Convert.ToInt32(value, CultureInfo.InvariantCulture);
+            case DoubleType:
+                return Convert.ToDouble(value, CultureInfo.InvariantCulture);
+            case BooleanType:
+                return Convert.ToBoolean(value, CultureInfo.InvariantCulture);
+            case StringType:
+                return value as string ?? Convert.ToString(value, CultureInfo.InvariantCulture);
+            default:
+                return value;
+        }
+    }
+
+    [GeneratedRegex(@"^create table if not exists `(?<c>[^`]+)`\.`(?<s>[^`]+)`\.`(?<t>[^`]+)` \((?<cols>.+)\)$", RegexOptions.Singleline)]
+    private static partial Regex CreatePattern();
+
+    [GeneratedRegex(@"^insert into `(?<c>[^`]+)`\.`(?<s>[^`]+)`\.`(?<t>[^`]+)` \(.+?\) select (?<sel>.+) from parquet\.`(?<dir>[^`]+)/`$", RegexOptions.Singleline)]
+    private static partial Regex InsertPattern();
+
+    [GeneratedRegex(@"^create or replace table `(?<c>[^`]+)`\.`(?<s>[^`]+)`\.`(?<t>[^`]+)` as select (?<sel>.+) from parquet\.`(?<dir>[^`]+)/`$", RegexOptions.Singleline)]
+    private static partial Regex ReplacePattern();
+
+    [GeneratedRegex(@"^merge into `(?<c>[^`]+)`\.`(?<s>[^`]+)`\.`(?<t>[^`]+)` t\nusing \(\n  select .+? from \(\n    select (?<sel>.+?), row_number\(\).+?from parquet\.`(?<dir>[^`]+)/`\n.+?\) s\non (?<on>.+?)\n", RegexOptions.Singleline)]
+    private static partial Regex MergePattern();
+
+    [GeneratedRegex(@"t\.`(?<k>[^`]+)` <=> s\.`[^`]+`")]
+    private static partial Regex MergeKeyPattern();
+
+    // One selection item: `col` or cast(`col` as TYPE) as `col`, where TYPE may carry a
+    // parenthesized precision/scale of its own (DECIMAL(20,0)).
+    [GeneratedRegex(@"cast\(`(?<col>[^`]+)` as [A-Za-z0-9_]+(?:\([0-9, ]*\))?\) as `(?<alias>[^`]+)`|`(?<col>[^`]+)`")]
+    private static partial Regex SelectColumnPattern();
 }
