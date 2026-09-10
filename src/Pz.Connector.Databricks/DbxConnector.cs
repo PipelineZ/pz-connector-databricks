@@ -8,7 +8,7 @@ namespace Pz.Connector.Databricks;
 /// <summary>Databricks for pz: a source reads a table or a query result through the SQL Statement
 /// Execution API as Arrow; a sink stages Parquet in a Unity Catalog volume and lands rows with one
 /// append/replace/merge statement.</summary>
-public sealed class DbxConnector : IConnector
+public sealed class DbxConnector : IConnector, ISourceConnector
 {
     private readonly ILoggerFactory _loggerFactory;
     private readonly TimeProvider _time;
@@ -71,8 +71,55 @@ public sealed class DbxConnector : IConnector
         return ValueTask.FromResult(errors.Count == 0 ? ValidationResult.Success : ValidationResult.Failed([.. errors]));
     }
 
-    public ValueTask<ConnectionCheck> CheckConnectionAsync(ConnectorConfig config, CancellationToken ct) =>
-        ValueTask.FromResult(new ConnectionCheck(false, "not implemented"));
+    ValueTask<ISource> ISourceConnector.OpenAsync(ConnectorConfig config, CancellationToken ct)
+    {
+        var connection = ParseOrThrow(config);
+        var (_, rest) = OpenRest(connection, _httpClientFactory());
+        return ValueTask.FromResult<ISource>(new DbxSource(connection, rest, _time, _loggerFactory.CreateLogger<DbxSource>()));
+    }
+
+    /// <summary>Proves the credential and the warehouse: the warehouse lookup needs a valid token,
+    /// and a running warehouse additionally answers <c>select 1</c>. A stopped warehouse is not a
+    /// failure -- it starts on the first statement -- but it is worth telling the user about.</summary>
+    public async ValueTask<ConnectionCheck> CheckConnectionAsync(ConnectorConfig config, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        var connection = DbxConnectionConfig.Parse(config, errors);
+        if (connection is null)
+        {
+            return new ConnectionCheck(false, string.Join("; ", errors));
+        }
+
+        using var httpClient = _httpClientFactory();
+        try
+        {
+            var (_, rest) = OpenRest(connection, httpClient);
+            var warehouse = await rest.GetWarehouseAsync("checking the warehouse", ct).ConfigureAwait(false);
+            var name = warehouse.Name ?? connection.WarehouseId;
+            switch (warehouse.State)
+            {
+                case "RUNNING":
+                    await DbxStatement.ExecuteRowsAsync(rest, connection, "select 1", null, "checking the warehouse",
+                        DbxCodes.Remote_WarehouseUnavailable, _time, _loggerFactory.CreateLogger<DbxConnector>(), ct).ConfigureAwait(false);
+                    return new ConnectionCheck(true, $"warehouse {name} RUNNING");
+                case "STOPPED" or "STARTING" or "STOPPING":
+                    return new ConnectionCheck(true, $"warehouse {name} is {warehouse.State}; it starts on the first statement");
+                default:
+                    return new ConnectionCheck(false, $"warehouse {name} is {warehouse.State ?? "in an unknown state"}");
+            }
+        }
+        catch (PzConnectorException ex)
+        {
+            return new ConnectionCheck(false, ex.Message);
+        }
+    }
+
+    private (IDbxTokenSource Tokens, DbxRestClient Client) OpenRest(DbxConnectionConfig connection, HttpClient httpClient)
+    {
+        var tokens = DbxAuth.Create(connection, httpClient, _time);
+        var rest = new DbxRestClient(httpClient, connection, tokens, connection.Redactor, _loggerFactory.CreateLogger<DbxRestClient>());
+        return (tokens, rest);
+    }
 
     // Redaction-free: Parse never embeds a secret's own text in an error message (every error names a
     // key or a rule), so no redactor built from a successful parse exists yet to route this through.
