@@ -2,6 +2,7 @@ using System.Reflection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pz.Connectors.Abstractions;
+using Pz.Connectors.Sdk;
 
 namespace Pz.Connector.Databricks;
 
@@ -15,8 +16,8 @@ public sealed class DbxConnector : IConnector, ISourceConnector, ISinkConnector
     private readonly long _spoolRollBytes;
     private readonly Func<HttpClient> _httpClientFactory;
 
-    public DbxConnector(ILoggerFactory? loggerFactory = null)
-        : this(loggerFactory, TimeProvider.System, 128L * 1024 * 1024, CreateHttpClient)
+    public DbxConnector(ILoggerFactory? loggerFactory = null, RemoteCalls? remote = null)
+        : this(loggerFactory, TimeProvider.System, 128L * 1024 * 1024, () => CreateHttpClient(remote))
     {
     }
 
@@ -35,15 +36,21 @@ public sealed class DbxConnector : IConnector, ISourceConnector, ISinkConnector
     /// would cut a healthy transfer, so the engine's <see cref="CancellationToken"/> -- threaded
     /// through every call on this connector -- is the only cutoff. A connect timeout stays, so a
     /// black-holed host still fails instead of hanging before a single byte moves.</summary>
-    internal static HttpClient CreateHttpClient() =>
-        new(new SocketsHttpHandler
+    internal static HttpClient CreateHttpClient(RemoteCalls? remote = null)
+    {
+        var socketsHandler = new SocketsHttpHandler
         {
             AutomaticDecompression = System.Net.DecompressionMethods.All,
             ConnectTimeout = TimeSpan.FromSeconds(30),
-        })
+        };
+
+        // The counting handler sits outside the sockets handler so every request -- statement
+        // submits, polls, chunk links, presigned downloads, staging uploads -- is counted once.
+        return new HttpClient(remote is null ? socketsHandler : remote.HttpHandler(socketsHandler))
         {
             Timeout = Timeout.InfiniteTimeSpan,
         };
+    }
 
     public ConnectorInfo Info { get; } = new(
         "databricks",
@@ -53,7 +60,7 @@ public sealed class DbxConnector : IConnector, ISourceConnector, ISinkConnector
     public ConnectorCapabilities Capabilities =>
         ConnectorCapabilities.ColumnPruning | ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow
         | ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.PartitionedRead | ConnectorCapabilities.Merge
-        | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional;
+        | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional | ConnectorCapabilities.ReportsStats;
 
     public string ConnectionConfigSchema => """
         { "type": "object", "required": ["host", "warehouse_id", "auth"], "properties": {

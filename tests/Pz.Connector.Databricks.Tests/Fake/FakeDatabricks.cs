@@ -48,6 +48,7 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
     public int PendingPollsBeforeSuccess { get; set; }
     public (string Code, string Message)? FailNextStatement { get; set; }
     public int RateLimitNextRequests { get; set; }
+    public int UnavailableNextRequests { get; set; }
     public bool ExpireFirstLinkFetch { get; set; }
 
     /// <summary>When set, a presigned-link GET answers 200 and its body hands over the chunk's first
@@ -98,6 +99,12 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
         {
             RateLimitNextRequests--;
             return Json(429, """{"error_code":"RESOURCE_EXHAUSTED","message":"too many requests"}""", ("Retry-After", "1"));
+        }
+
+        if (UnavailableNextRequests > 0)
+        {
+            UnavailableNextRequests--;
+            return Json(503, """{"error_code":"TEMPORARILY_UNAVAILABLE","message":"warehouse starting"}""");
         }
 
         if (RejectToken || !headers.TryGetValue("Authorization", out var auth) || !auth.StartsWith("Bearer ", StringComparison.Ordinal)
