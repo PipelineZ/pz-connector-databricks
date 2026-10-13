@@ -12,9 +12,19 @@ internal static class DbxErrors
     public static bool IsTransientStatementError(string? errorCode) =>
         errorCode is "TEMPORARILY_UNAVAILABLE" or "RESOURCE_EXHAUSTED" or "DEADLINE_EXCEEDED" or "INTERNAL_ERROR";
 
+    /// <summary>The codes by which the service says "slow down" or "not now". A 429 or 503 carrying
+    /// one is already counted by the HTTP handler; the same code on any other status, or on a
+    /// statement that FAILED under a 200, is counted here.</summary>
+    private static bool IsThrottleCode(string? errorCode) => errorCode is "TEMPORARILY_UNAVAILABLE" or "RESOURCE_EXHAUSTED";
+
     public static PzConnectorException FromHttp(int status, string? errorCode, string? message, TimeSpan? retryAfter,
         DbxRedactor redactor, string context)
     {
+        if (IsThrottleCode(errorCode) && status is not (429 or 503))
+        {
+            ConnectorStats.Current.AddThrottled(1);
+        }
+
         var text = $"{context}: {Describe(status, errorCode, message)}";
         return status switch
         {
@@ -34,6 +44,11 @@ internal static class DbxErrors
 
     public static PzConnectorException FromStatement(string? errorCode, string? message, DbxRedactor redactor, string context, string code)
     {
+        if (IsThrottleCode(errorCode))
+        {
+            ConnectorStats.Current.AddThrottled(1);
+        }
+
         var text = $"{context}: statement failed{(errorCode is null ? "" : $" ({errorCode})")}{(message is null ? "" : $": {message}")}";
         return IsTransientStatementError(errorCode)
             ? Transient(DbxCodes.Remote_WarehouseUnavailable, redactor, text, retryAfter: null)

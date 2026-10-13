@@ -31,6 +31,7 @@ internal static class DbxStatement
             WaitTimeout, "CONTINUE", cfg.Catalog, cfg.Schema, parameters);
 
         var response = await rest.SubmitStatementAsync(request, context, ct).ConfigureAwait(false);
+        ConnectorStats.Current.AddExtra("databricks.statements", 1);
         var statementId = response.StatementId
             ?? throw new PzConnectorException(DbxCodes.Message(failureCode, rest.Redactor, $"{context}: the service returned no statement id"), isTransient: false);
 

@@ -66,7 +66,7 @@ jobs:
           unzip -p "packages/Pz.Connector.Databricks.${VERSION}.nupkg" pz.connector.json | tee manifest.json
           grep -q '"runtime": "process"' manifest.json
           grep -q '"name": "databricks"' manifest.json
-          for cap in ColumnPruning PredicatePushdown BoundedWindow InclusiveWatermarkBound PartitionedRead Merge ReplaceWrites Transactional; do
+          for cap in ColumnPruning PredicatePushdown BoundedWindow InclusiveWatermarkBound PartitionedRead Merge ReplaceWrites Transactional ReportsStats; do
             grep -q "\"${cap}\"" manifest.json
           done
       - name: Install pz, restore from the local feed, run, conformance-test
@@ -79,7 +79,7 @@ jobs:
           PZ_DATABRICKS_STAGING_VOLUME: ${{ vars.PZ_DATABRICKS_STAGING_VOLUME }}
         run: |
           set -euo pipefail
-          dotnet tool install --global pz --version 0.6.1
+          dotnet tool install --global pz --version 0.11.0
           cd tests/e2e
           sed -i "s/0.0.0-PLACEHOLDER/${PKG_VERSION}/" project.yml
           pz restore --feeds "${GITHUB_WORKSPACE}/packages"
@@ -103,5 +103,9 @@ jobs:
           # Append is at-least-once: a second run lands the three again and stays green.
           pz run
           test "$(count)" -eq 6
+          # The run's two Databricks nodes (the read and the write) must both carry remote stats; a
+          # vacuous pass on zero matching nodes is a failure.
+          RUN_DIR="$(ls -dt .pz/runs/*/ | head -n1)"
+          jq -e '[.nodes[] | select(.connector=="databricks")] | (length == 2) and (map(.remote.requests > 0) | all)' "${RUN_DIR}run_results.json"
           pz connector test "${PKG_DIR}" --config probe.yml | tee report.txt
           ! grep -q FAIL report.txt
