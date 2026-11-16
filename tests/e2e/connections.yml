@@ -1,5 +1,6 @@
 # Both directions through the packaged connector against a real workspace: read a seeded table,
-# write an append output. Every value comes from the environment CI exports.
+# write an append output. CI only restores this project; `pz run` it by hand with the PZ_DATABRICKS_*
+# variables the README lists.
 dbx:
   connector: databricks
   host: ${PZ_DATABRICKS_HOST}

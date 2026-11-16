@@ -308,8 +308,8 @@ Optional, for the service-principal OAuth fact:
 
 - `PZ_DATABRICKS_CLIENT_ID`, `PZ_DATABRICKS_CLIENT_SECRET`
 
-Each fact creates and drops its own `pz_live_<tag>` schema. `tests/e2e/` is the pz project CI runs
-against a packed nupkg and a real workspace, using the same environment variables above (plus
-`PZ_DATABRICKS_CATALOG`).
+Each fact creates and drops its own `pz_live_<tag>` schema. `tests/e2e/` is the pz project CI restores
+the packed nupkg into, proving the package installs through `pz restore`; CI runs nothing against a real
+workspace.
 
 Releases are tag-triggered (`v*`) and publish to nuget.org through trusted publishing.

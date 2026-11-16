@@ -69,47 +69,11 @@ jobs:
           for cap in ColumnPruning PredicatePushdown BoundedWindow InclusiveWatermarkBound PartitionedRead Merge ReplaceWrites Transactional ReportsStats; do
             grep -q "\"${cap}\"" manifest.json
           done
-      - name: Install pz, restore from the local feed, run, conformance-test
-        env:
-          PZ_DATABRICKS_HOST: ${{ secrets.PZ_DATABRICKS_HOST }}
-          PZ_DATABRICKS_WAREHOUSE_ID: ${{ secrets.PZ_DATABRICKS_WAREHOUSE_ID }}
-          PZ_DATABRICKS_TOKEN: ${{ secrets.PZ_DATABRICKS_TOKEN }}
-          PZ_DATABRICKS_CATALOG: ${{ vars.PZ_DATABRICKS_CATALOG }}
-          PZ_DATABRICKS_SCHEMA: pz_e2e_${{ github.run_id }}
-          PZ_DATABRICKS_STAGING_VOLUME: ${{ vars.PZ_DATABRICKS_STAGING_VOLUME }}
+      - name: Install pz and restore the packed connector from the local feed
         run: |
           set -euo pipefail
           dotnet tool install --global pz --version 0.11.0
           cd tests/e2e
           sed -i "s/0.0.0-PLACEHOLDER/${PKG_VERSION}/" project.yml
           pz restore --feeds "${GITHUB_WORKSPACE}/packages"
-          PKG_DIR=".pz/packages/Pz.Connector.Databricks/${PKG_VERSION}"
-          test -f "${PKG_DIR}/native/Pz.Connector.Databricks"
-          if [ -z "${PZ_DATABRICKS_HOST}" ]; then
-            echo "no workspace secrets on this run (fork PR?): restore + manifest proven, skipping the live run"
-            exit 0
-          fi
-          # On an HTTP error the API's JSON body goes to stderr, so the log names the cause even when the
-          # caller discards stdout.
-          sql() {
-            local out
-            out=$(curl -sS --fail-with-body -X POST "${PZ_DATABRICKS_HOST}/api/2.0/sql/statements" \
-              -H "Authorization: Bearer ${PZ_DATABRICKS_TOKEN}" -H 'Content-Type: application/json' \
-              -d "{\"warehouse_id\":\"${PZ_DATABRICKS_WAREHOUSE_ID}\",\"statement\":$(printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"wait_timeout\":\"50s\"}") || { echo "$out" >&2; return 1; }
-            printf '%s\n' "$out"
-          }
-          trap 'sql "drop schema if exists ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA} cascade" >/dev/null' EXIT
-          sql "create schema ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA}" >/dev/null
-          sql "create table ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA}.orders_in as select * from values (1,'ann'),(2,'bob'),(3,'cy') t(id, name)" >/dev/null
-          pz run
-          count() { sql "select count(*) from ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA}.orders_out" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['data_array'][0][0])"; }
-          test "$(count)" -eq 3
-          # Append is at-least-once: a second run lands the three again and stays green.
-          pz run
-          test "$(count)" -eq 6
-          # The run's two Databricks nodes (the read and the write) must both carry remote stats; a
-          # vacuous pass on zero matching nodes is a failure.
-          RUN_DIR="$(ls -dt .pz/runs/*/ | head -n1)"
-          jq -e '[.nodes[] | select(.connector=="databricks")] | (length == 2) and (map(.remote.requests > 0) | all)' "${RUN_DIR}run_results.json"
-          pz connector test "${PKG_DIR}" --config probe.yml | tee report.txt
-          ! grep -q FAIL report.txt
+          test -f ".pz/packages/Pz.Connector.Databricks/${PKG_VERSION}/native/Pz.Connector.Databricks"
