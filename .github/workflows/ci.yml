@@ -70,6 +70,15 @@ jobs:
             grep -q "\"${cap}\"" manifest.json
           done
       - name: Install pz and restore the packed connector from the local feed
+        # pz loads connections.yml on restore and refuses an unset ${VAR}; restore never connects, so
+        # placeholders satisfy it.
+        env:
+          PZ_DATABRICKS_HOST: https://unused.invalid
+          PZ_DATABRICKS_WAREHOUSE_ID: unused
+          PZ_DATABRICKS_TOKEN: unused
+          PZ_DATABRICKS_CATALOG: unused
+          PZ_DATABRICKS_SCHEMA: unused
+          PZ_DATABRICKS_STAGING_VOLUME: unused.unused.unused
         run: |
           set -euo pipefail
           dotnet tool install --global pz --version 0.11.0
