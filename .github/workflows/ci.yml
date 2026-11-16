@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       - run: dotnet build Pz.Connector.Databricks.slnx -c Release
       # LiveDatabricks needs a real workspace and credentials neither runner has, so both legs
       # exclude it -- it stays a local/manual suite.
@@ -50,7 +50,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       - name: Publish the host RID (Native AOT) and pack
         run: |
           set -euo pipefail
