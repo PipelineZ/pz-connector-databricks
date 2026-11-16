@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       - run: dotnet build Pz.Connector.Databricks.slnx -c Release
       # LiveDatabricks needs a real workspace and credentials neither runner has, so both legs
       # exclude it -- it stays a local/manual suite.
@@ -50,7 +50,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.x'
       - name: Publish the host RID (Native AOT) and pack
         run: |
           set -euo pipefail
@@ -89,10 +89,14 @@ jobs:
             echo "no workspace secrets on this run (fork PR?): restore + manifest proven, skipping the live run"
             exit 0
           fi
+          # On an HTTP error the API's JSON body goes to stderr, so the log names the cause even when the
+          # caller discards stdout.
           sql() {
-            curl -sf -X POST "${PZ_DATABRICKS_HOST}/api/2.0/sql/statements" \
+            local out
+            out=$(curl -sS --fail-with-body -X POST "${PZ_DATABRICKS_HOST}/api/2.0/sql/statements" \
               -H "Authorization: Bearer ${PZ_DATABRICKS_TOKEN}" -H 'Content-Type: application/json' \
-              -d "{\"warehouse_id\":\"${PZ_DATABRICKS_WAREHOUSE_ID}\",\"statement\":$(printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"wait_timeout\":\"50s\"}"
+              -d "{\"warehouse_id\":\"${PZ_DATABRICKS_WAREHOUSE_ID}\",\"statement\":$(printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"wait_timeout\":\"50s\"}") || { echo "$out" >&2; return 1; }
+            printf '%s\n' "$out"
           }
           trap 'sql "drop schema if exists ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA} cascade" >/dev/null' EXIT
           sql "create schema ${PZ_DATABRICKS_CATALOG}.${PZ_DATABRICKS_SCHEMA}" >/dev/null
