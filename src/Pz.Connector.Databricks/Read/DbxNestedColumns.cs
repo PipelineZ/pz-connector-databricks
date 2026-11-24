@@ -67,7 +67,7 @@ internal static class DbxNestedColumns
             {
                 throw new PzConnectorException(
                     DbxCodes.Message(DbxCodes.Read_NestedValue, DbxRedactor.None,
-                        $"{context}: column '{column}' row {row + 1} is not a valid {type.Name} value ({ex.Message}) -- cast the column to STRING in a query: read to keep its JSON text"),
+                        $"{context}: column '{column}' row {row + 1} is not a valid {type.Name} value -- cast the column to STRING in a query: read to keep its JSON text"),
                     isTransient: false, innerException: ex);
             }
 
