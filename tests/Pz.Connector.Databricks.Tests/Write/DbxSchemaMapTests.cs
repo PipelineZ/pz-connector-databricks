@@ -89,10 +89,8 @@ public sealed class DbxSchemaMapTests
     }
 
     [Fact]
-    public void Nested_types_and_decimal256_are_PZDB0303()
+    public void Decimal256_is_PZDB0303()
     {
-        Assert.Throws<PzConnectorException>(() => PlanOne(new ListType(Int32Type.Default)));
-        Assert.Throws<PzConnectorException>(() => PlanOne(new StructType([new Apache.Arrow.Field("a", Int32Type.Default, true)])));
         Assert.Throws<PzConnectorException>(() => PlanOne(new Decimal256Type(50, 10)));
     }
 }

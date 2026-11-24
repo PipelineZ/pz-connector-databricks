@@ -41,7 +41,7 @@ internal sealed class DbxSource(
             spec.Dataset, chunks.Length, response.Manifest?.TotalRowCount, time.GetElapsedTime(start).TotalMilliseconds);
 
         return chunks
-            .Select(c => (IDatasetPartition)new DbxPartition(rest, statementId, c.ChunkIndex ?? 0, c.RowCount ?? 0, context, logger))
+            .Select(c => (IDatasetPartition)new DbxPartition(rest, statementId, c.ChunkIndex ?? 0, c.RowCount ?? 0, context, logger, schema.NestedColumns))
             .ToList();
     }
 

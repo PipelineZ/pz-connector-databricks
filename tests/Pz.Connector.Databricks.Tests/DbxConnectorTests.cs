@@ -13,7 +13,8 @@ public sealed class DbxConnectorTests
         Assert.Equal(ProtocolVersion.Major, c.Info.ProtocolMajor);
         var expected = ConnectorCapabilities.ColumnPruning | ConnectorCapabilities.PredicatePushdown | ConnectorCapabilities.BoundedWindow
             | ConnectorCapabilities.InclusiveWatermarkBound | ConnectorCapabilities.PartitionedRead | ConnectorCapabilities.Merge
-            | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional | ConnectorCapabilities.ReportsStats;
+            | ConnectorCapabilities.ReplaceWrites | ConnectorCapabilities.Transactional | ConnectorCapabilities.ReportsStats
+            | ConnectorCapabilities.NestedTypes;
         Assert.Equal(expected, c.Capabilities);
     }
 

@@ -29,8 +29,9 @@ internal static partial class DbxTypeMap
             var name = c.Name ?? "";
             var typeText = c.TypeText ?? "";
             var typeName = c.TypeName ?? "";
-            fields.Add(new Field(name, ToArrow(typeText, typeName, name), true));
-            readColumns.Add(new DbxReadColumn(name, SerializeExpression(typeText, typeName, DbxSql.Q(name))));
+            var nested = DbxNestedType.TryParse(typeText);
+            fields.Add(new Field(name, nested ?? ToArrow(typeText, typeName, name), true));
+            readColumns.Add(new DbxReadColumn(name, SerializeExpression(typeText, typeName, DbxSql.Q(name)), nested));
         }
 
         return new DbxReadSchema(new Schema(fields, null), readColumns);
@@ -106,6 +107,13 @@ internal static partial class DbxTypeMap
 internal sealed record DbxReadSchema(Schema Schema, IReadOnlyList<DbxReadColumn> Columns)
 {
     public bool HasSerializedColumns => Columns.Any(c => c.SerializeExpression is not null);
+
+    /// <summary>Column name to the nested Arrow type its JSON text is parsed into.</summary>
+    public IReadOnlyDictionary<string, IArrowType> NestedColumns { get; } =
+        Columns.Where(c => c.Nested is not null).ToDictionary(c => c.Name, c => c.Nested!, StringComparer.Ordinal);
 }
 
-internal sealed record DbxReadColumn(string Name, string? SerializeExpression);
+/// <summary><see cref="Nested"/> is the Arrow list/map/struct the column's JSON text becomes after it is
+/// read, or <see langword="null"/> for every other column, including a nested column whose type has no
+/// engine representation (it stays JSON text).</summary>
+internal sealed record DbxReadColumn(string Name, string? SerializeExpression, IArrowType? Nested = null);
