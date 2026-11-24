@@ -626,7 +626,7 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
             var key = Key(create);
             if (!Tables.ContainsKey(key))
             {
-                var cols = create.Groups["cols"].Value.Split(", ").Select(c =>
+                var cols = SplitTopLevel(create.Groups["cols"].Value).Select(c =>
                 {
                     var parts = c.Split(' ', 2);
                     return (parts[0].Trim('`'), TypeOf(parts[1]));
@@ -698,6 +698,38 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
             return row[index] is { } value ? "=" + Convert.ToString(value, CultureInfo.InvariantCulture) : "null";
         }));
 
+    /// <summary>Splits a column list on the commas outside <c>&lt;...&gt;</c> and backticks, so a nested
+    /// type's own commas stay inside its column.</summary>
+    private static IEnumerable<string> SplitTopLevel(string columns)
+    {
+        var depth = 0;
+        var quoted = false;
+        var start = 0;
+        for (var i = 0; i < columns.Length; i++)
+        {
+            var c = columns[i];
+            if (c == '`')
+            {
+                quoted = !quoted;
+            }
+            else if (!quoted && c == '<')
+            {
+                depth++;
+            }
+            else if (!quoted && c == '>')
+            {
+                depth--;
+            }
+            else if (!quoted && depth == 0 && c == ',')
+            {
+                yield return columns[start..i].Trim();
+                start = i + 1;
+            }
+        }
+
+        yield return columns[start..].Trim();
+    }
+
     private static string Key(Match m) => $"{m.Groups["c"].Value}.{m.Groups["s"].Value}.{m.Groups["t"].Value}";
 
     private static string[] Columns(string selection) =>
@@ -713,7 +745,7 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
         "TIMESTAMP" => new TimestampType(TimeUnit.Microsecond, "UTC"),
         "TIMESTAMP_NTZ" => new TimestampType(TimeUnit.Microsecond, (string?)null),
         "DATE" => Date32Type.Default,
-        _ => StringType.Default,
+        _ => StringType.Default, // ARRAY/STRUCT/MAP targets hold the spooled JSON text
     };
 
     private IArrowType ColumnTypeFromUploads(string dir, string column)
@@ -937,6 +969,6 @@ internal sealed partial class FakeDatabricks : HttpMessageHandler
 
     // One selection item: `col` or cast(`col` as TYPE) as `col`, where TYPE may carry a
     // parenthesized precision/scale of its own (DECIMAL(20,0)).
-    [GeneratedRegex(@"cast\(`(?<col>[^`]+)` as [A-Za-z0-9_]+(?:\([0-9, ]*\))?\) as `(?<alias>[^`]+)`|`(?<col>[^`]+)`")]
+    [GeneratedRegex(@"cast\(`(?<col>[^`]+)` as [A-Za-z0-9_]+(?:\([0-9, ]*\))?\) as `(?<alias>[^`]+)`|from_json\(`(?<col>[^`]+)`, '(?:[^'\\]|\\.)*'\) as `(?<alias>[^`]+)`|`(?<col>[^`]+)`")]
     private static partial Regex SelectColumnPattern();
 }

@@ -5,6 +5,7 @@ using Apache.Arrow.Types;
 using Parquet;
 using Parquet.Schema;
 using Pz.Connectors.Abstractions;
+using Pz.Connectors.Abstractions.Batches;
 
 namespace Pz.Connector.Databricks;
 
@@ -139,6 +140,7 @@ internal static class DbxColumnCopy
 {
     public static Task WriteAsync(ParquetRowGroupWriter group, DataField field, IArrowArray array, DbxColumnPlan plan, CancellationToken ct) => array switch
     {
+        _ when plan.FromJson => group.WriteAsync(field, MapRef(array.Length, i => array.IsNull(i) ? null : ArrowCell.ToJson(array, i)), null),
         Int8Array a => group.WriteAsync<int>(field, Map(a.Length, i => a.IsNull(i) ? null : (int?)a.GetValue(i)), null, cancellationToken: ct),
         Int16Array a => group.WriteAsync<int>(field, Map(a.Length, i => a.IsNull(i) ? null : (int?)a.GetValue(i)), null, cancellationToken: ct),
         Int32Array a => group.WriteAsync<int>(field, Map(a.Length, a.GetValue), null, cancellationToken: ct),

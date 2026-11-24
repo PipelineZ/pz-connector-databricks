@@ -224,7 +224,7 @@ public sealed class DbxSourceBehaviorTests
         await using var source = await ((ISourceConnector)Connector(fake)).OpenAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
 
         var schema = await source.GetSchemaAsync(Spec("complex"), CancellationToken.None);
-        Assert.IsType<StringType>(schema.Schema.GetFieldByName("tags")!.DataType);
+        Assert.IsType<ListType>(schema.Schema.GetFieldByName("tags")!.DataType);
         Assert.IsType<StringType>(schema.Schema.GetFieldByName("span")!.DataType);
 
         var tags = new List<string>();
@@ -233,11 +233,12 @@ public sealed class DbxSourceBehaviorTests
         {
             await foreach (var batch in partition.ReadAsync(BatchOptions.Default, CancellationToken.None))
             {
-                var tagsCol = (StringArray)batch.Column(1);
+                var tagsCol = (ListArray)batch.Column(1);
+                var tagValues = (Int32Array)tagsCol.Values;
                 var spanCol = (StringArray)batch.Column(2);
                 for (var i = 0; i < batch.Length; i++)
                 {
-                    tags.Add(tagsCol.GetString(i));
+                    tags.Add(string.Join(",", Enumerable.Range(tagsCol.ValueOffsets[i], tagsCol.GetValueLength(i)).Select(j => tagValues.GetValue(j))));
                     spans.Add(spanCol.GetString(i));
                 }
 
@@ -245,10 +246,48 @@ public sealed class DbxSourceBehaviorTests
             }
         }
 
-        Assert.Equal(["[1,2]"], tags);
+        Assert.Equal(["1,2"], tags);
         Assert.Equal(["INTERVAL '1' DAY"], spans);
         Assert.Contains(fake.Statements, s => s.Contains("to_json(`tags`) as `tags`", StringComparison.Ordinal));
         Assert.Contains(fake.Statements, s => s.Contains("cast(`span` as string) as `span`", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Nested_columns_are_declared_as_arrow_nested_types_and_read_as_values()
+    {
+        var fake = NewFake();
+        var table = new FakeTable(("id", Int64Type.Default), ("tags", StringType.Default), ("props", StringType.Default), ("raw", StringType.Default))
+            .WithDatabricksType("tags", "ARRAY<STRING>", "ARRAY")
+            .WithDatabricksType("props", "STRUCT<n: INT, m: MAP<STRING,BIGINT>>", "STRUCT")
+            .WithDatabricksType("raw", "ARRAY<BINARY>", "ARRAY");
+        table.Rows.Add([1L, "[\"a\",\"b\"]", "{\"n\":5,\"m\":{\"k\":9}}", "[\"AQI=\"]"]);
+        fake.Tables["main.sales.nested"] = table;
+        await using var source = await ((ISourceConnector)Connector(fake)).OpenAsync(new ConnectorConfig(fake.ConnectionConfig()), CancellationToken.None);
+
+        var schema = await source.GetSchemaAsync(Spec("nested"), CancellationToken.None);
+        Assert.IsType<ListType>(schema.Schema.GetFieldByName("tags")!.DataType);
+        Assert.IsType<StructType>(schema.Schema.GetFieldByName("props")!.DataType);
+        // A leaf the engine has no type for keeps the column as JSON text.
+        Assert.IsType<StringType>(schema.Schema.GetFieldByName("raw")!.DataType);
+
+        var seen = 0;
+        foreach (var partition in await source.PlanReadAsync(Spec("nested"), ReadHints.None, CancellationToken.None))
+        {
+            await foreach (var batch in partition.ReadAsync(BatchOptions.Default, CancellationToken.None))
+            {
+                Assert.Equal(schema.Schema.FieldsList.Select(f => f.DataType.TypeId), batch.Schema.FieldsList.Select(f => f.DataType.TypeId));
+                var tags = Assert.IsType<ListArray>(batch.Column(1));
+                Assert.Equal("b", ((StringArray)tags.Values).GetString(1));
+                var props = Assert.IsType<StructArray>(batch.Column(2));
+                Assert.Equal(5, ((Int32Array)props.Fields[0]).GetValue(0));
+                Assert.Equal("[\"AQI=\"]", ((StringArray)batch.Column(3)).GetString(0));
+                seen += batch.Length;
+                batch.Dispose();
+            }
+        }
+
+        Assert.Equal(1, seen);
+        Assert.Contains(fake.Statements, s => s.Contains("to_json(`props`) as `props`", StringComparison.Ordinal));
     }
 
     [Fact]

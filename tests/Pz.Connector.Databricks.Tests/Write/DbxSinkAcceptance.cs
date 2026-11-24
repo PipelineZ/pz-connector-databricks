@@ -13,6 +13,7 @@ public sealed class DbxSinkAcceptance : SinkConnectorAcceptanceTests
     private readonly FakeDatabricks _fake = new();
     private readonly string _append = $"append_{Guid.NewGuid():N}";
     private readonly string _merge = $"merge_{Guid.NewGuid():N}";
+    private readonly string _nested = $"nested_{Guid.NewGuid():N}";
     private readonly string _replace = $"replace_{Guid.NewGuid():N}";
 
     protected override ISinkConnector CreateSink() =>
@@ -30,6 +31,8 @@ public sealed class DbxSinkAcceptance : SinkConnectorAcceptanceTests
         _fake.Tables.Remove($"main.sales.{_merge}");
         return Task.CompletedTask;
     }
+
+    protected override OutputSpec? NestedOutput => new("databricks", _nested, "append", "fail_on_change", new Dictionary<string, object?>());
 
     protected override OutputSpec? ReplaceOutput => new("databricks", _replace, "replace", "fail_on_change", new Dictionary<string, object?>());
 

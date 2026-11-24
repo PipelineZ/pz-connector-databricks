@@ -33,6 +33,7 @@ win-x64) and `pz run` spawns it. Needs pz 0.6.0 or newer.
 | `PartitionedRead` | a read fans out across the result's chunks -- however many the service decides to return |
 | `Merge` | a sink output can declare `strategy: merge` with `keys:` |
 | `ReplaceWrites` | a sink output can declare `strategy: replace` |
+| `NestedTypes` | the sink takes list, struct and map columns, and the source returns them as Arrow nested types |
 | `Transactional` | exactly one statement touches the write target; a crash before it leaves the target untouched, and `AbortAsync` discards everything staged |
 
 There is no native scan or native copy: every read and write goes through the Arrow `RecordBatch`
@@ -145,7 +146,7 @@ is always `<=`.
 | `DATE` | date32 |
 | `TIMESTAMP` | timestamp, microsecond, `Etc/UTC` |
 | `TIMESTAMP_NTZ` | timestamp, microsecond, no time zone |
-| `ARRAY`/`MAP`/`STRUCT` | utf8 (JSON), via `to_json(col)` in the statement |
+| `ARRAY`/`MAP`/`STRUCT` | list/map/struct when every leaf is `INT`-family, `BIGINT`, `FLOAT`/`DOUBLE`, `DECIMAL`, `STRING`, `BOOLEAN`, `DATE` or `TIMESTAMP` (and map keys are one of those); otherwise utf8 (JSON). Read via `to_json(col)` in the statement either way |
 | `INTERVAL ...` | utf8, via `cast(col as string)` in the statement |
 
 The Statement Execution API's `ARROW_STREAM` disposition returns `ARRAY`/`MAP`/`STRUCT` as native
@@ -157,6 +158,17 @@ reference. A dataset with no such column reads exactly the SQL it always would (
 query verbatim); a `query:` read with one is instead wrapped as
 `select <projection> from (<query>) as pz_query`. `TIMESTAMP` is declared with time zone
 `"Etc/UTC"`, matching the wire.
+
+**Nested columns.** The statement still projects `to_json(col)`, so the wire carries JSON text; the
+connector parses it into the Arrow list/map/struct its `type_text` describes (`ARRAY<STRUCT<a: INT,
+tags: ARRAY<STRING>>>` and so on, any depth), with `SMALLINT`/`TINYINT` widened to int32 and `FLOAT`
+to double. A nested type with a leaf the engine has no type for (`BINARY`, `TIMESTAMP_NTZ`, `VARIANT`,
+`INTERVAL`, a nested map key) keeps the earlier behavior: the column is utf8 JSON text. A value that
+does not fit its declared type is `PZDB0207`, naming the column and row.
+
+**Changed behavior.** An `ARRAY`/`MAP`/`STRUCT` column with fully mappable leaves used to land as JSON
+text and now lands as a list/map/struct. To keep text, cast it in the query read:
+`select to_json(col) as col ...`, or `cast(col as string)`.
 
 An unrecognized Databricks type is `PZDB0205`; a dataset option that isn't `entity`/`query` is
 `PZDB0206`.
@@ -215,7 +227,17 @@ file, so the read-back `parquet.` path is always a real directory even for a zer
 | date32/date64 | DATE | `DATE` |
 | timestamp with time zone | TIMESTAMP(microsecond, UTC-adjusted) | `TIMESTAMP` |
 | timestamp without time zone | UTF8 ISO 8601 microsecond string, cast | `TIMESTAMP_NTZ` |
-| decimal256, time32/64, list/struct/map/union/dictionary/interval/duration/null | refused (`PZDB0303`) | -- |
+| list, fixed-size list | UTF8 JSON text, rebuilt with `from_json` | `ARRAY<T>` |
+| struct | UTF8 JSON text, rebuilt with `from_json` | `STRUCT<`name`: T, ...>` |
+| map (varchar keys) | UTF8 JSON text, rebuilt with `from_json` | `MAP<STRING, T>` |
+| decimal256, time32/64, union/dictionary/interval/duration/null, a map with non-varchar keys, a nested leaf outside int, bigint, double, decimal, varchar, boolean, date, timestamp | refused (`PZDB0303`) | -- |
+
+**Nested ruling.** Nested cells are spooled as JSON text (`ArrowCell.ToJson`) in a plain string column,
+not as Parquet repetition-level lists, and the target statement rebuilds them with
+`from_json(col, '<type>')` against the DDL type of the Arrow column, so an append into an existing
+`ARRAY`/`STRUCT`/`MAP` column inserts real values. `from_json` reads a map only with string keys, hence
+the varchar-key limit. A merge key must be a flat value: a struct, list or map key is refused with
+`PZDB0302` naming the column.
 
 **Decimal and uint64 ruling.** Parquet.Net writes `DECIMAL` through `System.Decimal`, which caps
 precision at 28 digits. To stay exact to Arrow's full 38-digit decimal128 range, decimal128 columns
@@ -273,8 +295,9 @@ Every failure is `databricks: PZDB####: <redacted text>`.
 | `PZDB0204` | a chunk's external link could not be fetched after one retry (expired signature), or its body arrived but does not decode as an Arrow stream |
 | `PZDB0205` | a Databricks column type has no Arrow mapping |
 | `PZDB0206` | a read dataset option is unknown |
+| `PZDB0207` | a nested column's JSON text does not fit its declared `ARRAY`/`MAP`/`STRUCT` type |
 | `PZDB0301` | an unsupported write mode reached the sink (only `append`/`replace`/`merge`) |
-| `PZDB0302` | `merge` mode has no keys, a merge key is absent from the write schema, or the write schema uses the reserved column `_pz_seq` |
+| `PZDB0302` | `merge` mode has no keys, a merge key is a struct/list/map, a merge key is absent from the write schema, or the write schema uses the reserved column `_pz_seq` |
 | `PZDB0303` | an Arrow column type has no Databricks/Parquet mapping |
 | `PZDB0304` | the existing target is missing a column the write needs (`fail_on_change`) |
 | `PZDB0305` | uploading a spool file to the staging volume failed; it inherits the transience of the HTTP failure underneath it |

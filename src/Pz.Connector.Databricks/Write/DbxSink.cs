@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using Apache.Arrow;
+using Apache.Arrow.Types;
 using Microsoft.Extensions.Logging;
 using Pz.Connectors.Abstractions;
 
@@ -46,6 +47,16 @@ internal sealed class DbxSink(
             if (missing.Count > 0)
             {
                 throw Refuse(DbxCodes.Write_MergeKeys, $"{context}: merge key(s) {string.Join(", ", missing.Select(k => $"'{k}'"))} not present in the write schema");
+            }
+        }
+
+        // A merge key is compared in the target statement's ON clause; it must be a flat value.
+        if (spec.Mode == "merge")
+        {
+            var nestedKeys = schema.FieldsList.Where(f => spec.Keys.Contains(f.Name) && f.DataType is NestedType).Select(f => $"'{f.Name}'").ToList();
+            if (nestedKeys.Count > 0)
+            {
+                throw Refuse(DbxCodes.Write_MergeKeys, $"{context}: merge key column {string.Join(", ", nestedKeys)} is a struct, list or map; a merge key must be a flat value");
             }
         }
 

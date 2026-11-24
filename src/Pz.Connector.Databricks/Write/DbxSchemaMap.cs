@@ -7,8 +7,12 @@ using Pz.Connectors.Abstractions;
 namespace Pz.Connector.Databricks;
 
 /// <summary>One write column: how it is spooled to Parquet, the Databricks type a created target
-/// gets, and the cast the target statement applies when the spooled representation is a string.</summary>
-internal sealed record DbxColumnPlan(string Name, DataField SpoolField, string DatabricksType, string? CastTo);
+/// gets, and the cast the target statement applies when the spooled representation is a string.
+///
+/// <para>A nested column (<see cref="FromJson"/>) is spooled as JSON text and rebuilt in the target
+/// statement with <c>from_json</c> against its declared type, so Parquet's repetition-level encoding is
+/// never involved.</para></summary>
+internal sealed record DbxColumnPlan(string Name, DataField SpoolField, string DatabricksType, string? CastTo, bool FromJson = false);
 
 /// <summary>Arrow to Parquet spool to Databricks. Parquet's own logical types carry every plain
 /// type exactly; decimals cannot, because the Parquet writer routes them through
@@ -31,7 +35,8 @@ internal static class DbxSchemaMap
         arrow.FieldsList.Select(f => PlanField(f, output)).ToList();
 
     public static string SelectExpression(DbxColumnPlan c) =>
-        c.CastTo is null ? DbxSql.Q(c.Name) : $"cast({DbxSql.Q(c.Name)} as {c.CastTo}) as {DbxSql.Q(c.Name)}";
+        c.FromJson ? $"from_json({DbxSql.Q(c.Name)}, '{EscapeLiteral(c.DatabricksType)}') as {DbxSql.Q(c.Name)}"
+        : c.CastTo is null ? DbxSql.Q(c.Name) : $"cast({DbxSql.Q(c.Name)} as {c.CastTo}) as {DbxSql.Q(c.Name)}";
 
     private static DbxColumnPlan PlanField(Apache.Arrow.Field f, string output)
     {
@@ -77,10 +82,39 @@ internal static class DbxSchemaMap
                     : new DbxColumnPlan(n,
                         new DateTimeDataField(n, DateTimeFormat.DateAndTimeMicros, isAdjustedToUTC: false, isNullable: true),
                         "TIMESTAMP_NTZ", null);
+            case ListType or FixedSizeListType or StructType or MapType:
+                return new DbxColumnPlan(n, new DataField(n, typeof(string), true), NestedTypeName(f.DataType, output, n), null, FromJson: true);
             default:
                 throw Unsupported(output, n, f.DataType);
         }
     }
+
+    /// <summary>The Databricks DDL spelling of a nested Arrow type. <c>from_json</c> reads a map only with
+    /// string keys, and the engine carries only the flat leaf types below; anything else is refused here,
+    /// before a byte is spooled.</summary>
+    private static string NestedTypeName(IArrowType type, string output, string column) => type switch
+    {
+        Int32Type => "INT",
+        Int64Type => "BIGINT",
+        DoubleType => "DOUBLE",
+        Decimal128Type d => $"DECIMAL({d.Precision.ToString(CultureInfo.InvariantCulture)},{d.Scale.ToString(CultureInfo.InvariantCulture)})",
+        StringType => "STRING",
+        BooleanType => "BOOLEAN",
+        Date32Type => "DATE",
+        TimestampType t when !string.IsNullOrEmpty(t.Timezone) => "TIMESTAMP",
+        ListType l => $"ARRAY<{NestedTypeName(l.ValueDataType, output, column)}>",
+        FixedSizeListType l => $"ARRAY<{NestedTypeName(l.ValueDataType, output, column)}>",
+        MapType m when m.KeyField.DataType is StringType =>
+            $"MAP<STRING, {NestedTypeName(m.ValueField.DataType, output, column)}>",
+        StructType s => $"STRUCT<{string.Join(", ", s.Fields.Select(f => $"{DbxSql.Q(f.Name)}: {NestedTypeName(f.DataType, output, column)}"))}>",
+        _ => throw new PzConnectorException(
+            DbxCodes.Message(DbxCodes.Write_UnsupportedArrowType, DbxRedactor.None,
+                $"{output}: column '{column}' has a nested type containing '{type.Name}', which Databricks cannot take here (map keys must be varchar; leaves are int, bigint, double, decimal, varchar, boolean, date, timestamp)"),
+            isTransient: false),
+    };
+
+    /// <summary>A type string as the body of a single-quoted Databricks literal.</summary>
+    private static string EscapeLiteral(string text) => text.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal);
 
     private static PzConnectorException Unsupported(string output, string column, IArrowType type) =>
         new(DbxCodes.Message(DbxCodes.Write_UnsupportedArrowType, DbxRedactor.None,

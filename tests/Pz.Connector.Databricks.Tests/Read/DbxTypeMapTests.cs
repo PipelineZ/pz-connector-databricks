@@ -113,7 +113,7 @@ public sealed class DbxTypeMapTests
     }
 
     [Fact]
-    public void ToReadSchema_marks_serialized_columns_and_keeps_the_arrow_schema_utf8()
+    public void ToReadSchema_marks_serialized_columns_and_declares_nested_ones_as_arrow_nested()
     {
         var readSchema = DbxTypeMap.ToReadSchema(new DbxResultSchema(3,
         [
@@ -123,7 +123,7 @@ public sealed class DbxTypeMapTests
         ]));
 
         Assert.Equal(["id", "tags", "span"], readSchema.Schema.FieldsList.Select(f => f.Name));
-        Assert.IsType<StringType>(readSchema.Schema.FieldsList[1].DataType);
+        Assert.IsType<ListType>(readSchema.Schema.FieldsList[1].DataType);
         Assert.IsType<StringType>(readSchema.Schema.FieldsList[2].DataType);
         Assert.True(readSchema.HasSerializedColumns);
 
